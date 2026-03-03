@@ -3,6 +3,7 @@
 members = [ 
     "data_trans_core", 
     "data_trans_cli",
+    "data_trans_reader",
     "my_app/rust"
 ]
 resolver = "2"

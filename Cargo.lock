@@ -570,6 +570,7 @@ dependencies = [
  "clap",
  "config",
  "dashmap",
+ "data_trans_reader",
  "dirs-next",
  "flutter_rust_bridge",
  "futures",
@@ -583,6 +584,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.2",
+]
+
+[[package]]
+name = "data_trans_reader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
 ]
 
 [[package]]

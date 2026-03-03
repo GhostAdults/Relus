@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::collections::{HashMap, BTreeMap};
 use sqlx::{Row, Column};
+use data_trans_reader::{DbReaderDriver, Job, JobSplitResult, Task};
 
 use crate::core::{Config, TypedVal};
 use crate::core::db::{DbKind, DbPool};
@@ -29,58 +30,45 @@ pub enum DataSourceType {
     },
 }
 
-/// 任务（Job Split 切分后的子任务）
-#[derive(Debug, Clone)]
-pub struct Task {
-    pub task_id: usize,
-    pub offset: usize,
-    pub limit: usize,
+pub struct CoreDbReaderDriver {
+    pool: Arc<DbPool>,
 }
 
-/// 任务切分结果
-pub struct JobSplitResult {
-    pub total_records: usize,
-    pub tasks: Vec<Task>,
+impl CoreDbReaderDriver {
+    pub fn new(pool: Arc<DbPool>) -> Self {
+        Self { pool }
+    }
 }
 
-/// Job trait - 定义数据读取任务的通用接口
-#[async_trait::async_trait]
-pub trait Job: Send + Sync {
-    /// 切分任务为多个子任务
-    async fn split(&self, reader_threads: usize) -> Result<JobSplitResult>;
+impl DbReaderDriver for CoreDbReaderDriver {
+    type Pool = DbPool;
 
-    /// 执行单个任务，读取数据并发送到 Channel
-    async fn execute_task(
-        &self,
-        task: Task,
-        tx: mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize>;
-
-    /// 获取任务描述（用于日志）
-    fn description(&self) -> String;
+    fn pool(&self) -> &Self::Pool {
+        self.pool.as_ref()
+    }
 }
 
 /// 数据库 Job 实现
 pub struct DatabaseJob {
     config: Arc<Config>,
-    pool: Arc<DbPool>,
+    db_reader: Arc<dyn DbReaderDriver<Pool = DbPool>>,
 }
 
 impl DatabaseJob {
-    pub fn new(config: Arc<Config>, pool: Arc<DbPool>) -> Self {
-        Self { config, pool }
+    pub fn new(config: Arc<Config>, db_reader: Arc<dyn DbReaderDriver<Pool = DbPool>>) -> Self {
+        Self { config, db_reader }
     }
 }
 
 #[async_trait::async_trait]
-impl Job for DatabaseJob {
+impl Job<PipelineMessage> for DatabaseJob {
     async fn split(&self, reader_threads: usize) -> Result<JobSplitResult> {
         let db_config = Config::parse_db_config(&self.config.input)?;
         let table = &db_config.table;
 
         let sql = format!("SELECT COUNT(*) as count FROM {}", table);
 
-        let total = match self.pool.as_ref() {
+        let total = match self.db_reader.pool() {
             DbPool::Postgres(pg_pool) => {
                 sqlx::query_scalar::<_, i64>(&sql)
                     .fetch_one(pg_pool)
@@ -141,7 +129,7 @@ impl Job for DatabaseJob {
         let mut sent = 0;
         let mut buffer = Vec::with_capacity(100);
 
-        match self.pool.as_ref() {
+        match self.db_reader.pool() {
             DbPool::Postgres(pg_pool) => {
                 let mut stream = sqlx::query(&sql).fetch(pg_pool);
 
@@ -244,7 +232,7 @@ impl ApiJob {
 }
 
 #[async_trait::async_trait]
-impl Job for ApiJob {
+impl Job<PipelineMessage> for ApiJob {
     async fn split(&self, _reader_threads: usize) -> Result<JobSplitResult> {
         Ok(JobSplitResult {
             total_records: 0,
@@ -871,9 +859,12 @@ impl Pipeline {
             DataSourceType::Database { .. } => {
                 println!("📊 数据库数据源，启动任务切分...");
 
-                let job: Arc<dyn Job> = Arc::new(DatabaseJob::new(
+                let db_reader: Arc<dyn DbReaderDriver<Pool = DbPool>> = Arc::new(
+                    CoreDbReaderDriver::new(Arc::clone(&self.pool)),
+                );
+                let job: Arc<dyn Job<PipelineMessage>> = Arc::new(DatabaseJob::new(
                     Arc::clone(&self.config),
-                    Arc::clone(&self.pool),
+                    db_reader,
                 ));
 
                 println!("📋 Job: {}", job.description());
@@ -900,7 +891,7 @@ impl Pipeline {
             DataSourceType::Api => {
                 println!("📊 API 数据源，使用单 Reader");
 
-                let job: Arc<dyn Job> = Arc::new(ApiJob::new(Arc::clone(&self.config)));
+                let job: Arc<dyn Job<PipelineMessage>> = Arc::new(ApiJob::new(Arc::clone(&self.config)));
                 println!("📋 Job: {}", job.description());
 
                 let split_result = job.split(1).await?;
