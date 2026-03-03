@@ -26,6 +26,7 @@ dirs-next = "2.0"
 dashmap = "5"
 futures = "0.3"
 async-trait = "0.1"
+data_trans_reader = { path = "../data_trans_reader" }
 
 
 [dev-dependencies]

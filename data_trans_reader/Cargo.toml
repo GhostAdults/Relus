@@ -1,0 +1,9 @@
+[package]
+name = "data_trans_reader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { workspace = true, features = ["sync"] }
