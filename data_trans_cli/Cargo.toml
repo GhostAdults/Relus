@@ -10,5 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 data_trans_core = { path = "../data_trans_core" }
-
-clap = { version = "4.5", features = ["derive"] }
+clap ={ workspace = true}

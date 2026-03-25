@@ -1,6 +1,7 @@
 use data_trans_core::init_system_config;
 use data_trans_core::core::serve::{create_config, update_config};
-use data_trans_core::core::{CreateConfigReq, UpdateConfigReq};
+use data_trans_common::job_config::{CreateConfigReq, UpdateConfigReq};
+
 use axum::Json;
 use serde_json::json;
 

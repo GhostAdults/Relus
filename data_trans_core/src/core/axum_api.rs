@@ -1,8 +1,9 @@
 use axum::{extract::Query, Json};
 use axum::http::StatusCode;
-use super::{TablesQuery, DescribeQuery, GenMapQuery, SyncReq};
 use serde_json::Value;
-use crate::core::{ApiResp};
+use data_trans_common::resp::{ApiResp};
+use data_trans_common::{TablesQuery, DescribeQuery, GenMapQuery};
+use crate::core::SyncReq;
 use crate::core::serve::{list_tables, sync_command, describe, gen_mapping};
 
 // get tables list

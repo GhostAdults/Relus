@@ -1,23 +1,18 @@
 pub mod core;
 pub mod dsl_engine;
-pub mod app_config;
-pub mod util;
-use crate::util::dbpool::DbKind;
 use anyhow::{Result, bail};
-use crate::core::{Config,serve_http};
+use data_trans_common::job_config::{JobConfig};
+use crate::core::serve_http;
 use regex::Regex;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc};
 use std::path::PathBuf;
 use parking_lot::RwLock;
-use crate::app_config::watcher;
-use crate::app_config::schema::ConfigSchema;
-use crate::app_config::value::ConfigValue;
-use crate::app_config::manager::ConfigManager;
-use crate::app_config::config_loader::apply_json_defaults;
-
-static SYSTEM_CONFIG: OnceLock<Option<Config>> = OnceLock::new();
-static CONFIG_MANAGER: OnceLock<Arc<RwLock<ConfigManager>>> = OnceLock::new();
-static WATCHER_HOLDER: OnceLock<notify::RecommendedWatcher> = OnceLock::new();
+use data_trans_common::app_config::watcher;
+use data_trans_common::app_config::schema::ConfigSchema;
+use data_trans_common::app_config::value::ConfigValue;
+use data_trans_common::app_config::manager::ConfigManager;
+use data_trans_common::app_config::config_loader::{CONFIG_MANAGER, SYSTEM_CONFIG,WATCHER_HOLDER};
+use data_trans_common::app_config::config_loader::{apply_json_defaults,get_config_manager};
 
 pub fn init_system_config() -> Option<Arc<RwLock<ConfigManager>>> {
     let mgr_arc = CONFIG_MANAGER.get_or_init(|| {
@@ -80,7 +75,7 @@ pub fn init_system_config() -> Option<Arc<RwLock<ConfigManager>>> {
     // 初始化 SYSTEM_CONFIG (保持兼容性，默认加载 id="default")
     SYSTEM_CONFIG.get_or_init(|| {
         let mgr = mgr_arc.read();
-        match Config::from_manager(&mgr, "default") {
+        match JobConfig::from_manager(&mgr, "default") {
              Ok(cfg) => Some(cfg),
              Err(e) => {
                  eprintln!("Failed to construct default Config: {}", e);
@@ -124,16 +119,12 @@ pub fn init_and_watch_config() {
     }
 }
 
-pub fn get_config_manager() -> Option<Arc<RwLock<ConfigManager>>> {
-    CONFIG_MANAGER.get().cloned()
-}
-
 // 获取当前的系统配置
-pub fn get_system_config(task_id: Option<&str>) -> Option<Config> {
+pub fn get_system_config(task_id: Option<&str>) -> Option<JobConfig> {
     if let Some(mgr_arc) = CONFIG_MANAGER.get() {
         let mgr = mgr_arc.read();
         let id = task_id.unwrap_or("default");
-        match Config::from_manager(&mgr, id) {
+        match JobConfig::from_manager(&mgr, id) {
              Ok(cfg) => Some(cfg),
              Err(_) => None
         }
@@ -141,7 +132,7 @@ pub fn get_system_config(task_id: Option<&str>) -> Option<Config> {
         None
     }
 }
-pub fn get_default_system_config() -> Option<&'static Config> {
+pub fn get_default_system_config() -> Option<&'static JobConfig> {
     SYSTEM_CONFIG.get().and_then(|c| c.as_ref())
 }
 
@@ -152,7 +143,7 @@ pub fn sanitize_identifier(s: &str) -> Result<()> {
     }
     Ok(())
 }
-pub fn read_config(path: PathBuf, task_id: Option<String>) -> Result<Config> {
+pub fn read_config(path: PathBuf, task_id: Option<String>) -> Result<JobConfig> {
     // 优先从内存中获取最新的系统配置（由 Watcher 维护）
     if let Some(cfg) = crate::get_system_config(task_id.as_deref()) {
          return Ok(cfg);
@@ -167,24 +158,11 @@ pub fn read_config(path: PathBuf, task_id: Option<String>) -> Result<Config> {
     bail!(format!("读取配置文件失败: {}", path.display()))
 }
 
-pub fn read_defaluts_config(path: PathBuf) -> Result<Config> {
+pub fn read_defaluts_config(path: PathBuf) -> Result<JobConfig> {
          if let Some(cfg) = crate::get_default_system_config() {
             return Ok(cfg.clone());
         }
         bail!(format!("读取默认配置文件失败: {}", path.display()))
-}
-
-pub fn detect_db_kind(url: &str, explicit: Option<DbKind>) -> Result<DbKind> {
-    if let Some(k) = explicit {
-        return Ok(k);
-    }
-    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-        Ok(DbKind::Postgres)
-    } else if url.starts_with("mysql://") {
-        Ok(DbKind::Mysql)
-    } else {
-        bail!("无法识别数据库类型，需提供 db_type 或使用以 postgres:// 或 mysql:// 开头的连接串")
-    }
 }
 
 // 启动 HTTP 服务

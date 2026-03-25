@@ -1,11 +1,19 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
+use crate::job_config::{JobConfig};
 use config::{Config, File};
 use serde_json::Value;
+use std::sync::{Arc, OnceLock};
+use parking_lot::RwLock;
 use crate::app_config::manager::ConfigManager;
 use crate::app_config::schema::ConfigSchema;
 use crate::app_config::value::ConfigValue;
+
+pub static SYSTEM_CONFIG: OnceLock<Option<JobConfig>> = OnceLock::new();
+pub static CONFIG_MANAGER: OnceLock<Arc<RwLock<ConfigManager>>> = OnceLock::new();
+pub static WATCHER_HOLDER: OnceLock<notify::RecommendedWatcher> = OnceLock::new();
+
 
 pub fn load_user_config(path: &Path) -> Result<HashMap<String, ConfigValue>> {
     let settings = Config::builder()
@@ -17,6 +25,10 @@ pub fn load_user_config(path: &Path) -> Result<HashMap<String, ConfigValue>> {
     let mut result = HashMap::new();
     flatten("", &ConfigValue::Object(root), &mut result);
     Ok(result)
+}
+
+pub fn get_config_manager() -> Option<Arc<RwLock<ConfigManager>>> {
+    CONFIG_MANAGER.get().cloned()
 }
 
 pub fn flatten(prefix: &str, value: &ConfigValue, out: &mut HashMap<String, ConfigValue>) {

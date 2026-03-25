@@ -1,0 +1,34 @@
+//! Writer 任务切分工具
+
+use std::sync::Arc;
+
+use data_trans_common::job_config::DbConfig;
+use data_trans_common::JobConfig;
+
+use crate::types::{JobSplitResult, WriteMode, WriteTask};
+
+/// 切分 Writer 任务
+pub fn do_split(original_config: &Arc<JobConfig>, writer_threads: usize) -> JobSplitResult {
+    let mode = original_config
+        .mode
+        .as_deref()
+        .map(WriteMode::from_str)
+        .unwrap_or(WriteMode::Insert);
+
+    let batch_size = original_config.batch_size.unwrap_or(100);
+
+    let db_config = DbConfig::default();
+    let use_transaction = db_config.use_transaction.unwrap_or(false);
+
+    let tasks: Vec<WriteTask> = (0..writer_threads)
+        .map(|i| WriteTask {
+            task_id: i,
+            config: Arc::clone(original_config),
+            mode,
+            use_transaction,
+            batch_size,
+        })
+        .collect();
+
+    JobSplitResult { tasks }
+}

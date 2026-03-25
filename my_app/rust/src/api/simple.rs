@@ -1,9 +1,9 @@
 pub use std::path::PathBuf;
 pub use data_trans_core::read_config;
 use flutter_rust_bridge::frb;
-use data_trans_core::app_config::path::default_config_path;
-pub use data_trans_core::core::Config;
-pub use data_trans_core::core::{TablesQuery,BaseDbQuery};
+use data_trans_common::app_config::path::default_config_path;
+pub use data_trans_common::job_config::JobConfig;
+pub use data_trans_common::resp::{TablesQuery,BaseDbQuery};
 pub use data_trans_core::core::serve::list_tables;
 use serde_json::json;
 
@@ -23,7 +23,7 @@ pub fn init_and_watch_config() {
 #[frb(sync)]
 pub fn get_config(path: Option<PathBuf>, id: Option<String>) -> Result<String, String> {
     let p: PathBuf = path.unwrap_or_else(|| default_config_path("app_trans"));
-    let config: Config = match read_config(p, id) {
+    let config: JobConfig = match read_config(p, id) {
         Ok(c) => c,
         Err(e) => return Err(e.to_string()),
     };
@@ -54,6 +54,6 @@ pub fn init_app() {
 }
 
 #[frb(sync)]
-pub fn config_to_json(config: &Config) -> String {
+pub fn config_to_json(config: &JobConfig) -> String {
     serde_json::to_string(config).unwrap_or_else(|e| e.to_string())
 }

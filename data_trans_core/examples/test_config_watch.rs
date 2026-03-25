@@ -1,4 +1,5 @@
-use data_trans_core::{init_and_watch_config, get_config_manager};
+use data_trans_common::app_config::*;
+use data_trans_core::init_and_watch_config;
 use std::thread;
 use std::time::Duration;
 use std::fs;
@@ -11,7 +12,7 @@ fn main() {
     init_and_watch_config();
     println!("Config initialized and watcher started.");
 
-    let mgr_arc = get_config_manager().expect("Config manager should be initialized");
+    let mgr_arc = config_loader::get_config_manager().expect("Config manager should be initialized");
     let config_path = mgr_arc.read().path.clone();
     println!("Config path: {:?}", config_path);
 

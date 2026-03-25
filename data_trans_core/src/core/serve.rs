@@ -1,213 +1,23 @@
-use axum::{Json};
 use axum::http::StatusCode;
-use std::result::Result::{Ok, Err};
+use axum::Json;
 use serde_json::Value;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use chrono::NaiveDateTime;
+use std::result::Result::{Err, Ok};
 
-use crate::core::{ApiResp};
-use crate::util::dbpool::{DbKind, DbPool, get_pool_from_query};
-use crate::util::dbutil::get_pool_from_config;
-use crate::core::{Config, ColInfo, TypedVal};
-use crate::core::pipeline::{DataSourceType, PipelineConfig, sync_with_pipeline_task};
-use anyhow::Result;
-use anyhow::*;
-use crate::get_config_manager;
-use sqlx::{Row, PgPool, MySqlPool};
-use super::{TablesQuery, DescribeQuery, GenMapQuery, BaseDbQuery,CreateConfigReq,UpdateConfigReq, MappingConfig};
-use crate::app_config::value::ConfigValue;
+use crate::core::pipeline::{sync_with_pipeline_task, PipelineConfig};
+use anyhow::{bail, Result};
+use data_trans_common::app_config::config_loader::get_config_manager;
+use data_trans_common::app_config::value::ConfigValue;
+use data_trans_common::job_config::JobConfig;
+use data_trans_common::resp::{ApiResp, ColInfo};
+use data_trans_common::types::DataSourceType;
+use data_trans_common::{
+    CreateConfigReq, DescribeQuery, GenMapQuery, MappingConfig, TablesQuery, UpdateConfigReq,
+};
+use data_trans_reader::rdbms_reader_util::util::dbpool::{get_pool_from_query, DbPool};
+use sqlx::{MySqlPool, PgPool, Row};
 
 use std::collections::HashMap;
-
-pub trait DbParams {
-    fn db_url_opt(&self) -> Option<&str>;
-    fn db_type_opt(&self) -> Option<&str>;
-    fn task_id_opt(&self) -> Option<&str> { None }
-
-    fn resolve_url(&self) -> Result<String> {
-        if let Some(s) = self.db_url_opt() {
-            if !s.is_empty() { return Ok(s.to_string()); }
-        }
-        
-        let task_id = self.task_id_opt().unwrap_or("default");
-
-        if let Some(mgr) = get_config_manager() {
-            let mgr = mgr.read();
-            if let Ok(cfg) = Config::from_manager(&mgr, task_id) {
-                if let Ok(db_config) = Config::parse_db_config(&cfg.output) {
-                    if !db_config.url.is_empty() {
-                        return Ok(db_config.url);
-                    }
-                }
-            }
-        }
-        bail!("missing db.url in query or config")
-    }
-
-    fn resolve_type(&self) -> Option<String> {
-        if let Some(s) = self.db_type_opt() {
-            if !s.is_empty() { return Some(s.to_string()); }
-        }
-
-        let task_id = self.task_id_opt().unwrap_or("default");
-
-        if let Some(mgr) = crate::get_config_manager() {
-             let mgr = mgr.read();
-             if let Ok(cfg) = Config::from_manager(&mgr, task_id) {
-                 return Config::get_source_db_type(&cfg.output);
-             }
-        }
-        None
-    }
-}
-
-impl DbParams for BaseDbQuery {
-    fn db_url_opt(&self) -> Option<&str> { self.db_url.as_deref() }
-    fn db_type_opt(&self) -> Option<&str> { self.db_type.as_deref() }
-    fn task_id_opt(&self) -> Option<&str> { self.task_id.as_deref() }
-}
-
-pub fn dbkind_from_opt_str(s: &Option<String>) -> Option<DbKind> {
-    s.as_ref().and_then(|v| {
-        if v.eq_ignore_ascii_case("postgres") {
-            Some(DbKind::Postgres)
-        } else if v.eq_ignore_ascii_case("mysql") {
-            Some(DbKind::Mysql)
-        } else {
-            None
-        }
-    })
-}
-
-
-fn extract_by_path<'a>(root: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    if path == "/" || path.is_empty() {
-        return Some(root);
-    }
-    if path.starts_with('/') {
-        return root.pointer(path);
-    }
-    let mut cur = root;
-    for seg in path.split('.') {
-        match cur {
-            JsonValue::Object(map) => {
-                cur = map.get(seg)?;
-            }
-            JsonValue::Array(arr) => {
-                if let Ok(idx) = seg.parse::<usize>() {
-                    cur = arr.get(idx)?;
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        }
-    }
-    Some(cur)
-}
-
-fn to_typed_value(v: &JsonValue, ty: Option<&str>) -> Result<TypedVal> {
-    match ty.unwrap_or("text") {
-        "int" => {
-            if v.is_null() {
-                return Ok(TypedVal::OptI64(None));
-            }
-            if let Some(n) = v.as_i64() {
-                Ok(TypedVal::I64(n))
-            } else if let Some(s) = v.as_str() {
-                let n = s.parse::<i64>()?;
-                Ok(TypedVal::I64(n))
-            } else {
-                bail!("无法转换为 int: {}", v)
-            }
-        }
-        "float" => {
-            if v.is_null() {
-                return Ok(TypedVal::OptF64(None));
-            }
-            if let Some(n) = v.as_f64() {
-                Ok(TypedVal::F64(n))
-            } else if let Some(s) = v.as_str() {
-                let n = s.parse::<f64>()?;
-                Ok(TypedVal::F64(n))
-            } else {
-                bail!("无法转换为 float: {}", v)
-            }
-        }
-        "bool" => {
-            if v.is_null() {
-                Ok(TypedVal::OptBool(None))
-            } else if let Some(b) = v.as_bool() {
-                Ok(TypedVal::Bool(b))
-            } else if let Some(s) = v.as_str() {
-                let b = match s {
-                    "true" | "1" => true,
-                    "false" | "0" => false,
-                    _ => bail!("无法转换为 bool: {}", s),
-                };
-                Ok(TypedVal::Bool(b))
-            } else {
-                bail!("无法转换为 bool: {}", v)
-            }
-        }
-        "json" => {
-            let s = serde_json::to_string(v)?;
-            Ok(TypedVal::Text(s))
-        }
-        "timestamp" => {
-            if v.is_null() {
-                return Ok(TypedVal::OptNaiveTs(None));
-            }
-            if let Some(s) = v.as_str() {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                    Ok(TypedVal::OptNaiveTs(Some(dt)))
-                } else if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-                    Ok(TypedVal::OptNaiveTs(Some(dt)))
-                } else {
-                    bail!("无法解析时间: {}", s)
-                }
-            } else {
-                bail!("无法转换为 timestamp: {}", v)
-            }
-        }
-        _ => {
-            if v.is_null() {
-                Ok(TypedVal::Text("".to_string()))
-            } else if let Some(s) = v.as_str() {
-                Ok(TypedVal::Text(s.to_string()))
-            } else {
-                Ok(TypedVal::Text(v.to_string()))
-            }
-        }
-    }
-}
-
-fn build_placeholders(kind: DbKind, count: usize, start: usize) -> String {
-    match kind {
-        DbKind::Postgres => {
-            let mut v = Vec::with_capacity(count);
-            for i in 0..count {
-                v.push(format!("${}", start + i));
-            }
-            v.join(", ")
-        }
-        DbKind::Mysql => vec!["?"; count].join(", "),
-    }
-}
-
-fn split_keys_nonkeys(cols: &[String], key_cols: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut keys = Vec::new();
-    let mut nonkeys = Vec::new();
-    for c in cols {
-        if key_cols.contains(c) {
-            keys.push(c.clone());
-        } else {
-            nonkeys.push(c.clone());
-        }
-    }
-    (keys, nonkeys)
-}
 
 pub async fn list_tables_postgres(pool: &PgPool) -> Result<Vec<String>> {
     let rows = sqlx::query("select tablename from pg_catalog.pg_tables where schemaname not in ('pg_catalog','information_schema')").fetch_all(pool).await?;
@@ -236,7 +46,11 @@ pub async fn fetch_columns_postgres(pool: &PgPool, table: &str) -> Result<Vec<Co
         let name: String = r.try_get("column_name")?;
         let ty: String = r.try_get("data_type")?;
         let is_nullable: String = r.try_get("is_nullable")?;
-        out.push(ColInfo { name, data_type: ty, is_nullable: is_nullable == "YES" });
+        out.push(ColInfo {
+            name,
+            data_type: ty,
+            is_nullable: is_nullable == "YES",
+        });
     }
     Ok(out)
 }
@@ -248,7 +62,11 @@ pub async fn fetch_columns_mysql(pool: &MySqlPool, table: &str) -> Result<Vec<Co
         let name: String = r.try_get("COLUMN_NAME")?;
         let ty: String = r.try_get("DATA_TYPE")?;
         let is_nullable: String = r.try_get("IS_NULLABLE")?;
-        out.push(ColInfo { name, data_type: ty, is_nullable: is_nullable == "YES" });
+        out.push(ColInfo {
+            name,
+            data_type: ty,
+            is_nullable: is_nullable == "YES",
+        });
     }
     Ok(out)
 }
@@ -257,7 +75,12 @@ fn guess_type(sql_type: &str) -> &'static str {
     let t = sql_type.to_ascii_lowercase();
     if t.contains("int") {
         "int"
-    } else if t.contains("numeric") || t.contains("decimal") || t.contains("double") || t.contains("real") || t.contains("float") {
+    } else if t.contains("numeric")
+        || t.contains("decimal")
+        || t.contains("double")
+        || t.contains("real")
+        || t.contains("float")
+    {
         "float"
     } else if t.contains("bool") {
         "bool"
@@ -268,9 +91,8 @@ fn guess_type(sql_type: &str) -> &'static str {
     }
 }
 
-
 /// 同步数据函数
-pub async fn sync(cfg: &Config, pool: &DbPool) -> Result<()> {
+pub async fn sync(cfg: &JobConfig) -> Result<()> {
     // 根据 input.type 判断数据源类型
     let data_source = match cfg.input.source_type.as_str() {
         "api" => DataSourceType::Api,
@@ -280,7 +102,10 @@ pub async fn sync(cfg: &Config, pool: &DbPool) -> Result<()> {
             offset: None,
         },
         unknown => {
-            bail!("不支持的输入类型: '{}'. 支持的类型: 'api', 'database'", unknown);
+            bail!(
+                "不支持的输入类型: '{}'. 支持的类型: 'api', 'database'",
+                unknown
+            );
         }
     };
 
@@ -293,7 +118,7 @@ pub async fn sync(cfg: &Config, pool: &DbPool) -> Result<()> {
         data_source,
     };
 
-    let _stats = sync_with_pipeline_task(cfg.clone(), pool.clone(), pipeline_config).await?;
+    let _stats = sync_with_pipeline_task(cfg.clone(), pipeline_config).await?;
     Ok(())
 }
 
@@ -301,15 +126,50 @@ pub async fn list_tables(q: TablesQuery) -> (StatusCode, Json<ApiResp<Vec<String
     match get_pool_from_query(&q.base).await {
         Ok(pool) => match pool {
             DbPool::Postgres(p) => match list_tables_postgres(&p).await {
-                Ok(tabs) => (StatusCode::OK, Json(ApiResp { ok: true, data: Some(tabs), error: None})),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+                Ok(tabs) => (
+                    StatusCode::OK,
+                    Json(ApiResp {
+                        ok: true,
+                        data: Some(tabs),
+                        error: None,
+                    }),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResp {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }),
+                ),
             },
             DbPool::Mysql(p) => match list_tables_mysql(&p).await {
-                Ok(tabs) => (StatusCode::OK, Json(ApiResp { ok: true, data: Some(tabs), error: None})),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+                Ok(tabs) => (
+                    StatusCode::OK,
+                    Json(ApiResp {
+                        ok: true,
+                        data: Some(tabs),
+                        error: None,
+                    }),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResp {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }),
+                ),
             },
         },
-        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        ),
     }
 }
 
@@ -319,19 +179,54 @@ pub async fn describe(q: DescribeQuery) -> (StatusCode, Json<ApiResp<Vec<Value>>
             DbPool::Postgres(p) => match fetch_columns_postgres(&p, &q.table).await {
                 Ok(cols) => {
                     let v = cols.into_iter().map(|c| serde_json::json!({"name": c.name, "data_type": c.data_type, "nullable": c.is_nullable})).collect::<Vec<_>>();
-                    (StatusCode::OK, Json(ApiResp { ok: true, data: Some(v), error: None }))
+                    (
+                        StatusCode::OK,
+                        Json(ApiResp {
+                            ok: true,
+                            data: Some(v),
+                            error: None,
+                        }),
+                    )
                 }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResp {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }),
+                ),
             },
             DbPool::Mysql(p) => match fetch_columns_mysql(&p, &q.table).await {
                 Ok(cols) => {
                     let v = cols.into_iter().map(|c| serde_json::json!({"name": c.name, "data_type": c.data_type, "nullable": c.is_nullable})).collect::<Vec<_>>();
-                    (StatusCode::OK, Json(ApiResp { ok: true, data: Some(v), error: None }))
+                    (
+                        StatusCode::OK,
+                        Json(ApiResp {
+                            ok: true,
+                            data: Some(v),
+                            error: None,
+                        }),
+                    )
                 }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResp {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }),
+                ),
             },
         },
-        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        ),
     }
 }
 
@@ -356,24 +251,66 @@ pub async fn gen_mapping(q: GenMapQuery) -> (StatusCode, Json<ApiResp<Value>>) {
                         "column_mapping": mapping,
                         "column_types": types
                     });
-                    (StatusCode::OK, Json(ApiResp { ok: true, data: Some(obj), error: None }))
+                    (
+                        StatusCode::OK,
+                        Json(ApiResp {
+                            ok: true,
+                            data: Some(obj),
+                            error: None,
+                        }),
+                    )
                 }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResp {
+                        ok: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                    }),
+                ),
             }
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        ),
     }
 }
 
-pub async fn sync_command(task_id: String, mapping: MappingConfig) -> (StatusCode, Json<ApiResp<Value>>) {
-    let mgr_arc = match crate::get_config_manager() {
+pub async fn sync_command(
+    task_id: String,
+    mapping: MappingConfig,
+) -> (StatusCode, Json<ApiResp<Value>>) {
+    let mgr_arc = match get_config_manager() {
         Some(m) => m,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some("ConfigManager not initialized".to_string()) })),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp {
+                    ok: false,
+                    data: None,
+                    error: Some("ConfigManager not initialized".to_string()),
+                }),
+            )
+        }
     };
 
-    let mut cfg = match Config::from_manager(&mgr_arc.read(), &task_id) {
+    let mut cfg = match JobConfig::from_manager(&mgr_arc.read(), &task_id) {
         Ok(c) => c,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResp {
+                    ok: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }),
+            )
+        }
     };
 
     // Override with mapping
@@ -387,23 +324,31 @@ pub async fn sync_command(task_id: String, mapping: MappingConfig) -> (StatusCod
             obj.insert("key_columns".to_string(), serde_json::json!(k));
         }
     }
-    
-    // Get pool from config
-    let pool = match get_pool_from_config(&cfg).await {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
-    };      
 
-    match sync(&cfg, &pool).await {
-        Ok(()) => (StatusCode::OK, Json(ApiResp { ok: true, data: Some(serde_json::json!({})), error: None })),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(format!("数据同步错误: {}", e)) })),
+    match sync(&cfg).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiResp {
+                ok: true,
+                data: Some(serde_json::json!({})),
+                error: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some(format!("数据同步错误: {}", e)),
+            }),
+        ),
     }
 }
 
 pub async fn create_config(Json(req): Json<CreateConfigReq>) -> (StatusCode, Json<ApiResp<Value>>) {
     if let Some(mgr_arc) = crate::get_config_manager() {
         let mut mgr = mgr_arc.write();
-        
+
         let mut tasks = match mgr.get("tasks") {
             Some(ConfigValue::Array(arr)) => arr.clone(),
             _ => Vec::new(),
@@ -414,7 +359,14 @@ pub async fn create_config(Json(req): Json<CreateConfigReq>) -> (StatusCode, Jso
             if let ConfigValue::Object(map) = task {
                 if let Some(ConfigValue::String(id)) = map.get("id") {
                     if id == &req.task_id {
-                         return (StatusCode::BAD_REQUEST, Json(ApiResp { ok: false, data: None, error: Some(format!("Task {} already exists", req.task_id)) }));
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResp {
+                                ok: false,
+                                data: None,
+                                error: Some(format!("Task {} already exists", req.task_id)),
+                            }),
+                        );
                     }
                 }
             }
@@ -423,10 +375,10 @@ pub async fn create_config(Json(req): Json<CreateConfigReq>) -> (StatusCode, Jso
         // Construct new task with defaults
         let mut new_task_map = HashMap::new();
         new_task_map.insert("id".to_string(), ConfigValue::String(req.task_id.clone()));
-        
+
         // Apply defaults first
         apply_default_task_values(&mut new_task_map);
-        
+
         // Merge user provided config
         merge_json_value(&mut new_task_map, &req.config);
 
@@ -436,18 +388,39 @@ pub async fn create_config(Json(req): Json<CreateConfigReq>) -> (StatusCode, Jso
         tasks.push(ConfigValue::Object(new_task_map));
 
         match mgr.set("tasks", ConfigValue::Array(tasks)) {
-            Ok(_) => (StatusCode::OK, Json(ApiResp { ok: true, data: None, error: None })),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+            Ok(_) => (
+                StatusCode::OK,
+                Json(ApiResp {
+                    ok: true,
+                    data: None,
+                    error: None,
+                }),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp {
+                    ok: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }),
+            ),
         }
     } else {
-         (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some("ConfigManager not initialized".to_string()) }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some("ConfigManager not initialized".to_string()),
+            }),
+        )
     }
 }
 
 pub async fn update_config(Json(req): Json<UpdateConfigReq>) -> (StatusCode, Json<ApiResp<Value>>) {
     if let Some(mgr_arc) = crate::get_config_manager() {
         let mut mgr = mgr_arc.write();
-        
+
         let mut tasks = match mgr.get("tasks") {
             Some(ConfigValue::Array(arr)) => arr.clone(),
             _ => Vec::new(),
@@ -460,10 +433,10 @@ pub async fn update_config(Json(req): Json<UpdateConfigReq>) -> (StatusCode, Jso
                     if id == &req.task_id {
                         // Direct merge using the recursive helper
                         merge_json_value(map, &req.updates);
-                        
+
                         // Protect ID from being changed via updates
                         map.insert("id".to_string(), ConfigValue::String(req.task_id.clone()));
-                        
+
                         found = true;
                         break;
                     }
@@ -472,15 +445,43 @@ pub async fn update_config(Json(req): Json<UpdateConfigReq>) -> (StatusCode, Jso
         }
 
         if !found {
-             return (StatusCode::NOT_FOUND, Json(ApiResp { ok: false, data: None, error: Some(format!("Task {} not found", req.task_id)) }));
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResp {
+                    ok: false,
+                    data: None,
+                    error: Some(format!("Task {} not found", req.task_id)),
+                }),
+            );
         }
 
         match mgr.set("tasks", ConfigValue::Array(tasks)) {
-            Ok(_) => (StatusCode::OK, Json(ApiResp { ok: true, data: None, error: None })),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some(e.to_string()) })),
+            Ok(_) => (
+                StatusCode::OK,
+                Json(ApiResp {
+                    ok: true,
+                    data: None,
+                    error: None,
+                }),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResp {
+                    ok: false,
+                    data: None,
+                    error: Some(e.to_string()),
+                }),
+            ),
         }
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResp { ok: false, data: None, error: Some("ConfigManager not initialized".to_string()) }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResp {
+                ok: false,
+                data: None,
+                error: Some("ConfigManager not initialized".to_string()),
+            }),
+        )
     }
 }
 
@@ -496,8 +497,10 @@ fn merge_json_value(target: &mut HashMap<String, ConfigValue>, updates: &serde_j
 
             // 如果 target 中已存在且也是 Object，则递归合并
             // 否则直接覆盖
-            let target_val = target.entry(k.clone()).or_insert_with(|| ConfigValue::String("".to_string()));
-            
+            let target_val = target
+                .entry(k.clone())
+                .or_insert_with(|| ConfigValue::String("".to_string()));
+
             match (target_val, v) {
                 (ConfigValue::Object(t_map), serde_json::Value::Object(_)) => {
                     merge_json_value(t_map, v);
@@ -512,28 +515,55 @@ fn merge_json_value(target: &mut HashMap<String, ConfigValue>, updates: &serde_j
 
 fn apply_default_task_values(map: &mut HashMap<String, ConfigValue>) {
     // Top level defaults
-    map.entry("db_type".to_string()).or_insert(ConfigValue::String("".to_string()));
-    map.entry("mode".to_string()).or_insert(ConfigValue::String("insert".to_string()));
-    map.entry("batch_size".to_string()).or_insert(ConfigValue::Int(100));
-    map.entry("column_mapping".to_string()).or_insert_with(|| ConfigValue::Object(HashMap::new()));
-    map.entry("column_types".to_string()).or_insert_with(|| ConfigValue::Object(HashMap::new()));
+    map.entry("db_type".to_string())
+        .or_insert(ConfigValue::String("".to_string()));
+    map.entry("mode".to_string())
+        .or_insert(ConfigValue::String("insert".to_string()));
+    map.entry("batch_size".to_string())
+        .or_insert(ConfigValue::Int(100));
+    map.entry("column_mapping".to_string())
+        .or_insert_with(|| ConfigValue::Object(HashMap::new()));
+    map.entry("column_types".to_string())
+        .or_insert_with(|| ConfigValue::Object(HashMap::new()));
 
     // DB defaults
-    let db = map.entry("db".to_string()).or_insert_with(|| ConfigValue::Object(HashMap::new()));
+    let db = map
+        .entry("db".to_string())
+        .or_insert_with(|| ConfigValue::Object(HashMap::new()));
     if let ConfigValue::Object(db_map) = db {
-        db_map.entry("url".to_string()).or_insert(ConfigValue::String("".to_string()));
-        db_map.entry("table".to_string()).or_insert(ConfigValue::String("".to_string()));
-        db_map.entry("key_columns".to_string()).or_insert_with(|| ConfigValue::Array(Vec::new()));
-        db_map.entry("max_connections".to_string()).or_insert(ConfigValue::Int(20));
-        db_map.entry("acquire_timeout_secs".to_string()).or_insert(ConfigValue::Int(60));
-        db_map.entry("use_transaction".to_string()).or_insert(ConfigValue::Bool(true));
+        db_map
+            .entry("url".to_string())
+            .or_insert(ConfigValue::String("".to_string()));
+        db_map
+            .entry("table".to_string())
+            .or_insert(ConfigValue::String("".to_string()));
+        db_map
+            .entry("key_columns".to_string())
+            .or_insert_with(|| ConfigValue::Array(Vec::new()));
+        db_map
+            .entry("max_connections".to_string())
+            .or_insert(ConfigValue::Int(20));
+        db_map
+            .entry("acquire_timeout_secs".to_string())
+            .or_insert(ConfigValue::Int(60));
+        db_map
+            .entry("use_transaction".to_string())
+            .or_insert(ConfigValue::Bool(true));
     }
 
     // API defaults
-    let api = map.entry("api".to_string()).or_insert_with(|| ConfigValue::Object(HashMap::new()));
+    let api = map
+        .entry("api".to_string())
+        .or_insert_with(|| ConfigValue::Object(HashMap::new()));
     if let ConfigValue::Object(api_map) = api {
-        api_map.entry("url".to_string()).or_insert(ConfigValue::String("".to_string()));
-        api_map.entry("method".to_string()).or_insert(ConfigValue::String("GET".to_string()));
-        api_map.entry("headers".to_string()).or_insert_with(|| ConfigValue::Object(HashMap::new()));
+        api_map
+            .entry("url".to_string())
+            .or_insert(ConfigValue::String("".to_string()));
+        api_map
+            .entry("method".to_string())
+            .or_insert(ConfigValue::String("GET".to_string()));
+        api_map
+            .entry("headers".to_string())
+            .or_insert_with(|| ConfigValue::Object(HashMap::new()));
     }
 }

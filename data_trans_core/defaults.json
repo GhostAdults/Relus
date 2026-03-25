@@ -6,26 +6,36 @@
         "name": "db_source",
         "type": "database",
         "config": {
-          "db_type": "mysql",
-          "url": "mysql://root:123456@127.0.0.1:3306/my_db",
-          "table": "zone_data",
-          "key_columns": ["id"],
-          "max_connections": 10,
-          "acquire_timeout_secs": 30,
-          "use_transaction": true
+          "connections": [
+            {
+              "db_type": "mysql",
+              "url": "mysql://root:123456@127.0.0.1:3306/my_db",
+              "table": "zone_data",
+              "key_columns": [
+                "id"
+              ],
+              "max_connections": 10,
+              "acquire_timeout_secs": 30,
+              "use_transaction": true
+            }
+          ]
         }
       },
       "output": {
         "name": "db_target",
         "type": "database",
         "config": {
-          "db_type": "postgres",
-          "url": "postgresql://postgres:123456@127.0.0.1:5432/test_db",
-          "table": "tb_example",
-          "key_columns": ["example"],
-          "max_connections": 10,
-          "acquire_timeout_secs": 30,
-          "use_transaction": true
+          "connection": {
+            "db_type": "postgres",
+            "url": "postgresql://postgres:123456@127.0.0.1:5432/test_db",
+            "table": "tb_example",
+            "key_columns": [
+              "example"
+            ],
+            "max_connections": 10,
+            "acquire_timeout_secs": 30,
+            "use_transaction": true
+          }
         }
       },
       "column_mapping": {
@@ -35,7 +45,8 @@
         "example": "example"
       },
       "mode": "insert",
-      "batch_size": 100
+      "batch_size": 100,
+      "channel_buffer_size": 1
     }
   ]
 }

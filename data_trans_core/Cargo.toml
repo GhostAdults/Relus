@@ -7,31 +7,35 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+data_trans_reader = { path = "../data_trans_reader" }
+data_trans_common = { path = "../data_trans_common" }
+data_trans_writer = { path = "../data_trans_writer" }
+clap = {workspace = true}
+chrono ={ workspace = true}
 nom = "7.1"
 tokio = { workspace = true}
 flutter_rust_bridge ={ workspace = true}
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+parking_lot ={ workspace = true}
+serde = { workspace = true}
+serde_json = {workspace = true}
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
 axum = "0.7"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "any", "mysql", "postgres", "chrono"] }
 regex = "1.10"
-chrono = { version = "0.4", features = ["serde"] }
-config = { version = "0.15.19", features = ["json"] }
 toml = "0.8"
-parking_lot = "0.12"
-notify = "6.1"
-dirs-next = "2.0"
-dashmap = "5"
 futures = "0.3"
 async-trait = "0.1"
-data_trans_reader = { path = "../data_trans_reader" }
+config = { version = "0.15.19", features = ["json"] }
 
 
 [dev-dependencies]
 tempfile = "3.24.0"
+criterion = { version = "0.5", features = ["async_futures"] }
 
 [[bench]]
 name = "async_trait_overhead"
+harness = false
+
+[[bench]]
+name = "pipeline_throughput"
 harness = false

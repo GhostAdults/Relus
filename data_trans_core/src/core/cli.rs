@@ -1,23 +1,24 @@
-// cli 命令行参数解析 
+// cli 命令行参数解析
 // 包含所有子命令的枚举类型 命令行同步配置
 
-use clap::{Parser, Subcommand};
-use crate::core::{Config, ApiConfig};
-use crate::{run_serve,detect_db_kind};
 use crate::core::serve::*;
-use crate::util::dbpool::DbKind;
-use crate::util::dbutil::get_pool_from_config;
-use tokio::runtime::Runtime;
-use std::path::PathBuf;
-use std::fs;
-use std::collections::BTreeMap;
+use crate::run_serve;
+use clap::{Parser, Subcommand};
+use data_trans_common::{ApiConfig, JobConfig};
+use data_trans_reader::rdbms_reader_util::util::dbpool::detect_db_kind;
+use data_trans_reader::rdbms_reader_util::util::dbpool::DbKind;
+
+use anyhow::{bail, Context, Result};
+use regex::Regex;
 use serde_json::Value;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{MySqlPool, PgPool, Row};
-use regex::Regex;
-use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
+use tokio::runtime::Runtime;
 
 #[derive(Parser)]
 #[command(name = "data_trans")]
@@ -75,10 +76,10 @@ pub enum Commands {
 }
 
 pub fn run_cli(cmd: Commands) {
-     match cmd {
+    match cmd {
         Commands::TestApi { config } => {
             let cfg = read_config(config).unwrap();
-            let api_config = Config::parse_api_config(&cfg.input).unwrap();
+            let api_config = JobConfig::parse_api_config(&cfg.input).unwrap();
             let v = fetch_json(&api_config).unwrap();
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
             let items = if let Some(p) = &api_config.items_json_path {
@@ -88,26 +89,19 @@ pub fn run_cli(cmd: Commands) {
             };
             println!("{}", serde_json::to_string_pretty(&items).unwrap());
         }
-        Commands::Sync { config } => {
-            match read_config(config) {
-                Ok(cfg) => {
-                    let rt = Runtime::new().unwrap();
-                    rt.block_on(async {
-                        match get_pool_from_config(&cfg).await {
-                            Ok(pool) => {
-                                if let Err(e) = sync(&cfg, &pool).await {
-                                    eprintln!("{}", e);
-                                }
-                            }
-                            Err(e) => eprintln!("{}", e),
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
+        Commands::Sync { config } => match read_config(config) {
+            Ok(cfg) => {
+                let rt = Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = sync(&cfg).await {
+                        eprintln!("{}", e);
+                    }
+                });
             }
-        }
+            Err(e) => {
+                eprintln!("{}", e);
+            }
+        },
         Commands::ListTables { db_url, db_type } => {
             let kind = detect_db_kind(&db_url, db_type).unwrap();
             let rt = Runtime::new().unwrap();
@@ -225,26 +219,19 @@ pub fn run_cli(cmd: Commands) {
                 println!("written {}", output.display());
             });
         }
-        Commands::SyncWithMapping { config } => {
-            match read_config(config) {
-                Ok(cfg) => {
-                    let rt = Runtime::new().unwrap();
-                    rt.block_on(async {
-                        match get_pool_from_config(&cfg).await {
-                            Ok(pool) => {
-                                if let Err(e) = sync(&cfg, &pool).await {
-                                    eprintln!("{}", e);
-                                }
-                            }
-                            Err(e) => eprintln!("{}", e),
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
+        Commands::SyncWithMapping { config } => match read_config(config) {
+            Ok(cfg) => {
+                let rt = Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = sync(&cfg).await {
+                        eprintln!("{}", e);
+                    }
+                });
             }
-        }
+            Err(e) => {
+                eprintln!("{}", e);
+            }
+        },
         Commands::Serve { host, port } => {
             if let Err(e) = run_serve(host, port) {
                 eprintln!("{}", e);
@@ -261,19 +248,17 @@ fn sanitize_identifier(s: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_config(path: PathBuf) -> Result<Config> {
-    let data =
-        fs::read_to_string(&path).with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let cfg: Config = serde_json::from_str(&data)
+fn read_config(path: PathBuf) -> Result<JobConfig> {
+    let data = fs::read_to_string(&path)
+        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+    let cfg: JobConfig = serde_json::from_str(&data)
         .or_else(|_| {
             let v: Value = serde_json::from_str(&data)?;
             serde_json::from_value(v)
         })
-        .unwrap_or_else(|_| {
-            Config::default_with_id("default".to_string())
-        });
+        .unwrap_or_else(|_| JobConfig::default_with_id("default".to_string()));
 
-    let db_config = Config::parse_db_config(&cfg.output)?;
+    let db_config = JobConfig::parse_database_config(&cfg.output)?;
     sanitize_identifier(&db_config.table)?;
     for k in cfg.column_mapping.keys() {
         sanitize_identifier(k)?;

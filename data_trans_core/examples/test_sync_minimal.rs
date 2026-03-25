@@ -1,4 +1,5 @@
-use data_trans_core::{init_system_config, core::serve::sync_command, core::MappingConfig};
+use data_trans_core::{init_system_config, core::serve::sync_command, };
+use data_trans_common::job_config::MappingConfig;
 use std::collections::BTreeMap;
 
 #[tokio::main]
