@@ -186,12 +186,12 @@ async fn main() {
         source_type: "database".to_string(),
         is_table_mode: true,
         query_sql: Some(vec![
-            "SELECT id, userAccount, userPassword FROM user".to_string()
+            "SELECT id, type, site_number FROM zone_data".to_string()
         ]),
         config: json!({
             "db_type": "mysql",
             "url": "mysql://root:123456@127.0.0.1:3306/my_db",
-            "table": "user",
+            "table": "zone_data",
             "key_columns": ["id"]
         }),
     };
@@ -204,7 +204,7 @@ async fn main() {
         config: json!({
             "db_type": "mysql",
             "url": "mysql://root:123456@127.0.0.1:3306/my_db",
-            "table": "user_w",
+            "table": "zone_data_r",
             "key_columns": ["id"]
         }),
     };
@@ -212,20 +212,20 @@ async fn main() {
     // 扩展的列映射配置
     let mut column_mapping = BTreeMap::new();
     column_mapping.insert("id".to_string(), "id".to_string());
-    column_mapping.insert("userAccount".to_string(), "userAccount".to_string());
-    column_mapping.insert("userPassword".to_string(), "userPassword".to_string());
-    column_mapping.insert("isActive".to_string(), "isActive".to_string());
-    column_mapping.insert("score".to_string(), "score".to_string());
-    column_mapping.insert("createdAt".to_string(), "createdAt".to_string());
+    column_mapping.insert("type".to_string(), "type".to_string());
+    column_mapping.insert("site_number".to_string(), "site_number".to_string());
+    // column_mapping.insert("isActive".to_string(), "isActive".to_string());
+    // column_mapping.insert("score".to_string(), "score".to_string());
+    // column_mapping.insert("createdAt".to_string(), "createdAt".to_string());
 
     // 扩展的类型配置 - 测试多种类型转换
     let mut column_types = BTreeMap::new();
     column_types.insert("id".to_string(), "int".to_string());
-    column_types.insert("userAccount".to_string(), "text".to_string());
-    column_types.insert("userPassword".to_string(), "text".to_string());
-    column_types.insert("isActive".to_string(), "bool".to_string());
-    column_types.insert("score".to_string(), "float".to_string());
-    column_types.insert("createdAt".to_string(), "timestamp".to_string());
+    column_types.insert("type".to_string(), "text".to_string());
+    column_types.insert("site_number".to_string(), "text".to_string());
+    // column_types.insert("isActive".to_string(), "bool".to_string());
+    // column_types.insert("score".to_string(), "float".to_string());
+    // column_types.insert("createdAt".to_string(), "timestamp".to_string());
 
     let config = JobConfig {
         id: "test_sync_with_types".to_string(),

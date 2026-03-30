@@ -2,7 +2,6 @@
 //!
 //! Reader → Channel → Writer 架构
 //!
-//! 职责：
 //! - 创建和管理工作 Channel
 //! - 启动 Reader/Writer 任务
 //! - 实现背压控制和消息分发
@@ -243,7 +242,10 @@ where
             match &msg {
                 PipelineMessage::DataBatch(_) => {
                     if writer_txs[current_writer].send(msg).await.is_err() {
-                        let err_msg = format!("Writer 分发器: Writer-{} Channel 已关闭，可能已失败", current_writer);
+                        let err_msg = format!(
+                            "Writer 分发器: Writer-{} Channel 已关闭，可能已失败",
+                            current_writer
+                        );
                         error!("{}", err_msg);
                         // 立即停止分发，检查 Writer 状态
                         drop(writer_txs);
@@ -476,7 +478,10 @@ fn spawn_writer_task_dynamic(
             match &msg {
                 PipelineMessage::DataBatch(_) => {
                     if writer_txs[current_writer].send(msg).await.is_err() {
-                        let err_msg = format!("Writer 分发器: Writer-{} Channel 已关闭，可能已失败", current_writer);
+                        let err_msg = format!(
+                            "Writer 分发器: Writer-{} Channel 已关闭，可能已失败",
+                            current_writer
+                        );
                         error!("{}", err_msg);
                         // 立即停止分发，检查 Writer 状态
                         drop(writer_txs);

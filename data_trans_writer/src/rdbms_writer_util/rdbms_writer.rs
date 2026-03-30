@@ -171,8 +171,6 @@ pub fn prepare_db_batch(
     if mapped_rows.is_empty() {
         bail!("没有数据需要同步");
     }
-    println!("数据 {:#?}", mapped_rows);
-
     let columns: Vec<String> = mapped_rows[0].field_names().cloned().collect();
     let (keys, nonkeys) = split_keys_nonkeys(&columns, key_columns);
     let base_sql = build_base_sql(table_name, &columns, &keys, &nonkeys, mode, db_kind)?;

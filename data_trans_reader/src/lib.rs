@@ -54,7 +54,7 @@ pub struct SplitResult {
 
 /// Reader Job trait
 ///
-/// 所有数据源读取器必须实现此 trait
+/// 所有数据源读取器 trait
 /// 统一输出 PipelineMessage 类型
 #[async_trait::async_trait]
 pub trait ReaderJob: Send + Sync {
