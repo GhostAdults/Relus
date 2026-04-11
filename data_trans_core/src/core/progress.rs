@@ -36,7 +36,7 @@ pub fn create_progress_bars(total_records: usize) -> ProgressContext {
 
         let spacer = multi.insert_after(&rb, ProgressBar::new(1));
         spacer.set_style(spinner_style());
-        spacer.set_message(" ");
+        spacer.set_message("-------------------------------------------------------------");
 
         let wb = multi.insert_after(&spacer, ProgressBar::new(total_records as u64));
         wb.set_style(sty);
@@ -75,7 +75,7 @@ impl ProgressContext {
         self.reader_bar.finish_with_message("Done.");
         self.writer_bar.finish_with_message("Done.");
         self.spacer
-            .finish_with_message("--------------------------------------------");
+            .finish_with_message("-------------------------------------------------------------");
 
         // summary
         self.multi.println("All tasks completed!").unwrap();

@@ -19,7 +19,7 @@ fn main() {
     let cli = Cli::parse();
     init_and_watch_config();
 
-    let log_file = std::fs::File::create("app.log").expect("无法创建 app.log");
+    let log_file = std::fs::File::create("job.log").expect("无法创建 job.log");
     let log_file = Mutex::new(log_file);
 
     tracing_subscriber::fmt()
