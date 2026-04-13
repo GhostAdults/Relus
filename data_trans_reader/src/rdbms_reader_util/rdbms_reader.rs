@@ -16,6 +16,7 @@ use data_trans_common::constant::pipeline::DEFAULT_BATCH_SIZE;
 use data_trans_common::interface::{ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
 use data_trans_common::pipeline::RecordBuilder;
 use data_trans_common::schema::{MetadataDiscoverer, RdbmsDiscoverer, TableSchema};
+use data_trans_common::types::SourceType;
 use data_trans_common::JobConfig;
 use data_trans_common::PipelineMessage;
 
@@ -45,8 +46,10 @@ pub struct RdbmsJob {
 
 impl RdbmsJob {
     pub fn init(original_config: Arc<JobConfig>, config: RdbmsConfig) -> Self {
+        let source_type = SourceType::from_str(&original_config.input.source_type);
         let builder =
-            RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone());
+            RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone())
+                .with_source_type(source_type);
 
         Self {
             original_config,

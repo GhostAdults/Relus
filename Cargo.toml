@@ -9,13 +9,51 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+name = "relus"
+version = "0.1.0"
+edition = "2021"
+authors = ["https://github.com/GhostAdults/Relus"]
+
+[profile.release]
+# opt-level 可选值：
+# 0 - 无优化（最快编译）
+# 1 - 基本优化
+# 2 - 一些优化
+# 3 - 全部优化（最慢编译，最快运行）
+# "s" - 优化大小
+# "z" - 更激进的大小优化
+opt-level = 3     # 最大优化
+lto = true        # 启用链接时优化
+codegen-units = 1 # 减少代码生成单元以提高性能
+
 [workspace.dependencies]
+toml = "0.8"
+futures = "0.3"
+async-trait = "0.1"
+config = { version = "0.15.19", features = ["json"] }
+uuid = { version = "1.11", features = ["v4"] }
+tokio-util = "0.7"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 tokio = { version = "1.36", features = ["rt-multi-thread", "macros"] }
 # flutter_rust_bridge = "=2.11.1" //暂时不使用flutter_rust_bridge，后续如果需要再添加
+regex = "1.10"
+rust_decimal = "1.36"
 chrono = { version = "0.4", features = ["serde"] }
-clap = "4.5.60"
+clap = { version = "4.5", features = ["derive"] }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 indicatif = "0.17"
+anyhow = "1.0"
+axum = "0.7"
+rand = "0.10"
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "runtime-tokio",
+    "mysql",
+    "postgres",
+    "chrono",
+    "rust_decimal",
+] }

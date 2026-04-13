@@ -1,12 +1,16 @@
 //! Record 构建器
 //!
 //! 统一数据转换入口，支持从 JSON 构建 Record (MappingRow)
+//! 支持两种映射模式：
+//! - 纯路径映射：`"user.name"` → 直接提取 JSON 字段
+//! - DSL 表达式：`"upper(source.name)"` → 通过 SyncEngine 执行变换
 
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::dsl_engine::SyncEngine;
 use crate::types::{
     MappingRow, MappingSchema, OriginalTypeInfo, SourceType, TypeConverterRegistry,
 };
@@ -27,6 +31,44 @@ fn extract_by_path<'a>(item: &'a JsonValue, path: &str) -> Option<&'a JsonValue>
     Some(current)
 }
 
+/// 映射策略：纯路径 ：：DSL 表达式
+enum MappingStrategy {
+    Path,
+    Dsl,
+}
+
+/// 判断 mapping 值的解析策略
+///
+/// DSL 表达式必须以显式前缀引导：
+/// - `= ` 或 `expr:` → DSL 表达式，前缀后的内容交给 SyncEngine
+/// - 其他 → 纯 JSON 路径，走 extract_by_path
+///
+/// 示例：
+/// - `"name"` → 纯路径
+/// - `"user.name"` → 纯路径（支持点号嵌套）
+/// - `"= upper(source.name)"` → DSL
+/// - `"expr: if(source.age >= 18, 1, 0)"` → DSL
+fn classify_mapping(value: &str) -> MappingStrategy {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with('=') || trimmed.starts_with("expr:") {
+        MappingStrategy::Dsl
+    } else {
+        MappingStrategy::Path
+    }
+}
+
+/// 从 mapping 值中提取 DSL 表达式（去掉前缀）
+fn extract_dsl_rule(value: &str) -> &str {
+    let trimmed = value.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("expr:") {
+        rest.trim_start()
+    } else if let Some(rest) = trimmed.strip_prefix('=') {
+        rest.trim_start()
+    } else {
+        trimmed
+    }
+}
+
 /// Record 构建器 - 统一数据转换入口
 ///
 /// 直接构建 MappingRow (Record)，包含完整的类型元信息
@@ -36,6 +78,7 @@ pub struct RecordBuilder {
     registry: Arc<TypeConverterRegistry>,
     source_type: SourceType,
     table_name: Option<String>,
+    transform_engine: Option<SyncEngine>,
 }
 
 impl RecordBuilder {
@@ -43,12 +86,15 @@ impl RecordBuilder {
         column_mapping: BTreeMap<String, String>,
         column_types: Option<BTreeMap<String, String>>,
     ) -> Self {
+        let transform_engine = Self::build_engine_if_needed(&column_mapping);
+
         Self {
             column_mapping,
             column_types,
             registry: Arc::new(TypeConverterRegistry::new()),
             source_type: SourceType::Other("unknown".to_string()),
             table_name: None,
+            transform_engine,
         }
     }
 
@@ -57,13 +103,35 @@ impl RecordBuilder {
         column_types: Option<BTreeMap<String, String>>,
         registry: Arc<TypeConverterRegistry>,
     ) -> Self {
+        let transform_engine = Self::build_engine_if_needed(&column_mapping);
+
         Self {
             column_mapping,
             column_types,
             registry,
             source_type: SourceType::Other("unknown".to_string()),
             table_name: None,
+            transform_engine,
         }
+    }
+
+    fn build_engine_if_needed(column_mapping: &BTreeMap<String, String>) -> Option<SyncEngine> {
+        let has_dsl = column_mapping
+            .values()
+            .any(|v| matches!(classify_mapping(v), MappingStrategy::Dsl));
+        if !has_dsl {
+            return None;
+        }
+
+        let rules: Vec<(String, String)> = column_mapping
+            .iter()
+            .map(|(target, source)| match classify_mapping(source) {
+                MappingStrategy::Dsl => (target.clone(), extract_dsl_rule(source).to_string()),
+                MappingStrategy::Path => (target.clone(), format!("source.{}", source)),
+            })
+            .collect();
+
+        Some(SyncEngine::new(rules))
     }
 
     pub fn with_source_type(mut self, source_type: SourceType) -> Self {
@@ -110,6 +178,45 @@ impl RecordBuilder {
 
         row.source = item.clone();
 
+        if let Some(ref engine) = self.transform_engine {
+            self.build_with_transform(engine, item, &mut row)?;
+        } else {
+            self.build_with_path(item, &mut row)?;
+        }
+
+        Ok(row)
+    }
+
+    /// DSL transform 路径：通过 SyncEngine 处理
+    fn build_with_transform(
+        &self,
+        engine: &SyncEngine,
+        item: &JsonValue,
+        row: &mut MappingRow,
+    ) -> Result<()> {
+        let transformed = engine.process_row(item);
+
+        for target_col in self.column_mapping.keys() {
+            let source_val = transformed
+                .get(target_col)
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            let type_hint = self.get_type_hint(target_col);
+            let typed_val = self.registry.convert(&source_val, type_hint)?;
+
+            let type_info = OriginalTypeInfo::new(
+                self.source_type.clone(),
+                type_hint.unwrap_or("text").to_string(),
+            );
+
+            row.insert_value(target_col, typed_val, type_info);
+        }
+
+        Ok(())
+    }
+
+    /// 纯路径映射：通过 extract_by_path 提取
+    fn build_with_path(&self, item: &JsonValue, row: &mut MappingRow) -> Result<()> {
         for (target_col, source_path) in &self.column_mapping {
             let source_val = extract_by_path(item, source_path).unwrap_or(&JsonValue::Null);
             let type_hint = self.get_type_hint(target_col);
@@ -123,7 +230,7 @@ impl RecordBuilder {
             row.insert_value(target_col, typed_val, type_info);
         }
 
-        Ok(row)
+        Ok(())
     }
 
     /// 批量构建 Record
@@ -188,7 +295,6 @@ mod tests {
         let items = vec![json!({"id": 1}), json!({"id": 2})];
 
         let records = builder.build_batch(&items).unwrap();
-        println!("{:#?}", records);
         assert_eq!(records.len(), 2);
     }
 
@@ -220,6 +326,78 @@ mod tests {
                 assert_eq!(records.len(), 2);
             }
             _ => panic!("Expected DataBatch"),
+        }
+    }
+
+    #[test]
+    fn test_dsl_transform_upper() {
+        let mut mapping = BTreeMap::new();
+        mapping.insert("name".to_string(), "= upper(source.name)".to_string());
+        mapping.insert("age".to_string(), "age".to_string());
+
+        let builder = RecordBuilder::new(mapping, None);
+        let item = json!({"name": "alice", "age": 25});
+
+        let record = builder.build(&item).unwrap();
+        match record.get_value("name").unwrap() {
+            crate::types::UnifiedValue::String(s) => assert_eq!(s, "ALICE"),
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dsl_transform_if() {
+        let mut mapping = BTreeMap::new();
+        mapping.insert(
+            "is_adult".to_string(),
+            "= if(source.age >= 18, 1, 0)".to_string(),
+        );
+
+        let mut types = BTreeMap::new();
+        types.insert("is_adult".to_string(), "int".to_string());
+
+        let builder = RecordBuilder::new(mapping, Some(types));
+
+        let adult = builder.build(&json!({"age": 25})).unwrap();
+        match adult.get_value("is_adult").unwrap() {
+            crate::types::UnifiedValue::Int(n) => assert_eq!(*n, 1),
+            other => panic!("expected Int(1), got {:?}", other),
+        }
+
+        let child = builder.build(&json!({"age": 12})).unwrap();
+        match child.get_value("is_adult").unwrap() {
+            crate::types::UnifiedValue::Int(n) => assert_eq!(*n, 0),
+            other => panic!("expected Int(0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dsl_transform_constant() {
+        let mut mapping = BTreeMap::new();
+        mapping.insert("tag".to_string(), "expr: 'IMPORTED'".to_string());
+        mapping.insert("id".to_string(), "id".to_string());
+
+        let builder = RecordBuilder::new(mapping, None);
+        let record = builder.build(&json!({"id": 42})).unwrap();
+
+        match record.get_value("tag").unwrap() {
+            crate::types::UnifiedValue::String(s) => assert_eq!(s, "IMPORTED"),
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_dsl_pure_path_unchanged() {
+        let mut mapping = BTreeMap::new();
+        mapping.insert("name".to_string(), "name".to_string());
+
+        let builder = RecordBuilder::new(mapping, None);
+        assert!(builder.transform_engine.is_none());
+
+        let record = builder.build(&json!({"name": "test"})).unwrap();
+        match record.get_value("name").unwrap() {
+            crate::types::UnifiedValue::String(s) => assert_eq!(s, "test"),
+            other => panic!("expected String, got {:?}", other),
         }
     }
 }

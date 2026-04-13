@@ -1,7 +1,7 @@
 [package]
 name = "data_trans_core"
-version = "0.1.0"
-edition = "2021"
+version = { workspace = true }
+edition = { workspace = true }
 
 [lib]
 path = "src/lib.rs"
@@ -12,31 +12,24 @@ data_trans_common = { path = "../data_trans_common" }
 data_trans_writer = { path = "../data_trans_writer" }
 clap = { workspace = true }
 chrono = { workspace = true }
-nom = "7.1"
 tokio = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { workspace = true }
 # flutter_rust_bridge ={ workspace = true}
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = "1.0"
-axum = "0.7"
-rand = "0.10"
-sqlx = { version = "0.7", default-features = false, features = [
-    "runtime-tokio",
-    "any",
-    "mysql",
-    "postgres",
-    "chrono",
-] }
-regex = "1.10"
+anyhow = { workspace = true }
+axum = { workspace = true }
+rand = { workspace = true }
+sqlx = { workspace = true }
+regex = { workspace = true }
 indicatif = { workspace = true }
-toml = "0.8"
-futures = "0.3"
-async-trait = "0.1"
+toml = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
 config = { version = "0.15.19", features = ["json"] }
 tracing = { workspace = true }
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { workspace = true }
 
 
 [dev-dependencies]

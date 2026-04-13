@@ -77,6 +77,6 @@ impl WriterJob<PipelineMessage> for DatabaseJob {
     }
 
     fn description(&self) -> String {
-        format!("DatabaseJob (target: {})", self.original_config.output.name)
+        format!("{}", self.original_config.output.name)
     }
 }

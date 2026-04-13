@@ -1,28 +1,27 @@
 [package]
 name = "data_trans_reader"
-version = "0.1.0"
-edition = "2021"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 data_trans_common = { path = "../data_trans_common" }
 
-clap = { version = "4.5", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 dashmap = "5"
-anyhow = "1.0"
-async-trait = "0.1"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.7", features = [
-    "runtime-tokio-rustls",
-    "postgres",
-    "mysql",
-] }
-futures = "0.3"
+sqlx = { workspace = true }
+futures = { workspace = true }
 num-bigint = "0.4"
 num-traits = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { workspace = true }
-rust_decimal = "1.36"
+rust_decimal = { workspace = true }

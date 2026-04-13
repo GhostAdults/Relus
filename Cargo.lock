@@ -692,19 +692,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data_trans_cli"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "data_trans_common",
- "data_trans_core",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "data_trans_common"
 version = "0.1.0"
 dependencies = [
@@ -715,6 +702,7 @@ dependencies = [
  "config",
  "dashmap",
  "dirs-next",
+ "nom",
  "notify",
  "parking_lot",
  "redb",
@@ -742,7 +730,6 @@ dependencies = [
  "data_trans_writer",
  "futures",
  "indicatif",
- "nom",
  "parking_lot",
  "rand 0.10.0",
  "regex",
@@ -2418,6 +2405,19 @@ name = "regex-syntax"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
+
+[[package]]
+name = "relus-cli"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "data_trans_common",
+ "data_trans_core",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "rend"

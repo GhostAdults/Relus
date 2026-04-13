@@ -12,7 +12,7 @@ pub enum PipelineMessage {
     Error(String),
 }
 
-/// 数据库批次
+/// 数据库批次（写入用）
 #[derive(Debug)]
 pub struct DbBatch {
     pub base_sql: String,

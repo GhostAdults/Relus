@@ -14,7 +14,7 @@ impl FormatTime for ChronoLocalTimer {
         write!(w, "{}", Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
     }
 }
-
+/// 数据同步 cli 入口
 fn main() {
     let cli = Cli::parse();
     init_and_watch_config();

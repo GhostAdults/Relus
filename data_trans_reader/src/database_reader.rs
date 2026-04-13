@@ -101,6 +101,6 @@ impl ReaderJob for DatabaseJob {
     }
 
     fn description(&self) -> String {
-        format!("DatabaseJob (source: {})", self.original_config.input.name)
+        format!("{}", self.original_config.input.name)
     }
 }

@@ -1,27 +1,24 @@
 [package]
 name = "data_trans_writer"
-version = "0.1.0"
-edition = "2021"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 data_trans_common = { path = "../data_trans_common" }
 data_trans_reader = { path = "../data_trans_reader" }
 
 tracing = { workspace = true }
-anyhow = "1.0"
-async-trait = "0.1"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.7", features = [
-    "runtime-tokio-rustls",
-    "postgres",
-    "mysql",
-    "chrono",
-    "rust_decimal",
-] }
+sqlx = { workspace = true }
 chrono = { workspace = true }
-rust_decimal = "1.36"
+rust_decimal = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

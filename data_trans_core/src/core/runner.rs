@@ -180,8 +180,8 @@ pub async fn run_sync(config: Arc<JobConfig>) -> Result<RunResult> {
     let registry = GlobalRegistry::instance();
 
     // 动态创建 Reader 和 Writer
-    let reader = registry.create_reader(&config.input.source_type, Arc::clone(&config))?;
-    let writer = registry.create_writer(&config.output.source_type, Arc::clone(&config))?;
+    let reader = registry.prepare_reader(&config.input.source_type, Arc::clone(&config))?;
+    let writer = registry.prepare_writer(&config.output.source_type, Arc::clone(&config))?;
 
     // 执行同步
     let runner = Runner::from_config(&config);

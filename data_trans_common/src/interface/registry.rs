@@ -50,7 +50,7 @@ impl GlobalRegistry {
     }
 
     /// 创建 Reader 实例
-    pub fn create_reader(
+    pub fn prepare_reader(
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
@@ -67,7 +67,7 @@ impl GlobalRegistry {
     }
 
     /// 创建 Writer 实例
-    pub fn create_writer(
+    pub fn prepare_writer(
         &self,
         source_type: &str,
         config: Arc<JobConfig>,

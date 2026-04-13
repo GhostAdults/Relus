@@ -71,8 +71,10 @@ fn eval_call(expr: &Expr, ctx: &EvalContext, registry: &FunctionRegistry) -> Val
             match registry.call(name, args, &eval_fn) {
                 Ok(result) => result,
                 Err(e) => {
-                    eprintln!("函数调用失败: {}", e);
-                    Value::Null
+                    panic!(
+                        "DSL 函数调用失败: {}\n  函数: {}\n  可用函数: upper, concat, coalesce, if\n请检查 column_mapping 中的函数名是否正确",
+                        e, name
+                    );
                 }
             }
         },
@@ -151,7 +153,12 @@ impl SyncEngine {
                 Ok(ast) => {
                     mappings.insert(target_field, ast);
                 },
-                Err(e) => eprintln!("❌ 规则 '{}' 编译失败: {}", rule, e),
+                Err(e) => {
+                    panic!(
+                        "column_mapping 字段 '{}' 的 DSL 规则编译失败:\n  规则: {}\n  错误: {}\n请检查语法是否正确",
+                        target_field, rule, e
+                    );
+                },
             }
         }
 

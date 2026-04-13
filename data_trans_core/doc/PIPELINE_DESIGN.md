@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于 DataX 的设计思想，将数据同步流程重构为 **Reader → Channel → Writer** 的多线程管道架构。
+数据同步流程为 **Reader → Channel → Writer** 的多线程管道架构。
 
 **重要更新**：
 - ✅ 已删除 `sync_nodes.rs`，所有功能整合到 `sync_pipeline.rs`

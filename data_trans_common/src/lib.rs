@@ -1,6 +1,7 @@
 pub mod app_config;
 pub mod constant;
 pub mod db;
+pub mod dsl_engine;
 pub mod interface;
 pub mod job_config;
 pub mod pipeline;

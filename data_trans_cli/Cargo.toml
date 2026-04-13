@@ -1,18 +1,26 @@
 [package]
-name = "data_trans_cli"
-version = "0.1.0"
-edition = "2021"
+name = "relus-cli"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
 
+
+[package.metadata.packager]
+# 1. 全局配置
+formats = ["nsis"]
+before-packaging-command = "cargo build --release"
+# # 如果有资源文件，也放在这里
+# resources = ["configs/**/*"]
 
 [[bin]]
-name = "data_trans_cli"
+name = "relus-cli"
 path = "src/main.rs"
 
 [dependencies]
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
-chrono = "0.4"
 data_trans_core = { path = "../data_trans_core" }
 data_trans_common = { path = "../data_trans_common" }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use data_trans_common::pipeline::{PipelineMessage, RecordBuilder};
+use data_trans_common::types::SourceType;
 use data_trans_common::JobConfig;
 
 use crate::rdbms_reader_util::util;
@@ -19,8 +20,9 @@ pub struct ApiJob {
 
 impl ApiJob {
     pub fn new(config: Arc<JobConfig>) -> Self {
-        let builder =
-            RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone());
+        let source_type = SourceType::from_str(&config.input.source_type);
+        let builder = RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone())
+            .with_source_type(source_type);
         Self { config, builder }
     }
 }

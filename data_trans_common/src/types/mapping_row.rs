@@ -9,9 +9,9 @@ use std::collections::HashMap;
 
 use super::{MappingField, MappingSchema, OriginalTypeInfo, UnifiedValue};
 
-/// 一行数据（全流程唯一传输对象）
+/// 行数据（传输映射结构）
 ///
-/// Reader -> Channel -> Pipeline -> Writer 全程仅传输此结构体
+/// Reader -> Channel -> Pipeline -> Writer
 /// Record 是 MappingRow 的类型别名
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappingRow {
@@ -66,16 +66,20 @@ impl MappingRow {
     }
 
     /// 插入值和类型信息
-    pub fn insert_value(&mut self, name: impl Into<String>, value: UnifiedValue, info: OriginalTypeInfo) {
-        self.fields.insert(name.into(), MappingField::new(value, info));
+    pub fn insert_value(
+        &mut self,
+        name: impl Into<String>,
+        value: UnifiedValue,
+        info: OriginalTypeInfo,
+    ) {
+        self.fields
+            .insert(name.into(), MappingField::new(value, info));
     }
 
     /// 插入简单字段（自动创建类型信息）
     pub fn insert_simple(&mut self, name: impl Into<String>, value: UnifiedValue, type_name: &str) {
-        self.fields.insert(
-            name.into(),
-            MappingField::simple(value, type_name),
-        );
+        self.fields
+            .insert(name.into(), MappingField::simple(value, type_name));
     }
 
     /// 获取字段
@@ -120,7 +124,10 @@ impl MappingRow {
 
     /// 获取表名
     pub fn table_name(&self) -> Option<&str> {
-        self.schema.table_name.as_deref().or(self.source_table.as_deref())
+        self.schema
+            .table_name
+            .as_deref()
+            .or(self.source_table.as_deref())
     }
 
     /// 获取所有字段值
@@ -257,7 +264,10 @@ mod tests {
     fn test_mapping_row_from_values() {
         let mut values = HashMap::new();
         values.insert("id".to_string(), UnifiedValue::Int(1));
-        values.insert("name".to_string(), UnifiedValue::String("Alice".to_string()));
+        values.insert(
+            "name".to_string(),
+            UnifiedValue::String("Alice".to_string()),
+        );
 
         let row = MappingRow::from_values(values, serde_json::json!({"source": "test"}));
 

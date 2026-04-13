@@ -22,7 +22,7 @@ use tokio::runtime::Runtime;
 #[derive(Parser)]
 #[command(name = "data_trans")]
 #[command(version)]
-#[command(about = "从接口获取 JSON 数据并同步到 MySQL/Postgres")]
+#[command(about = "Relus 数据迁移工具 relus-cli@tingfengyu", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
