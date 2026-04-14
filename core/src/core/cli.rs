@@ -4,9 +4,9 @@
 use crate::core::serve::*;
 use crate::run_serve;
 use clap::{Parser, Subcommand};
-use relus_common::db::pool::detect_db_kind;
-use relus_common::db::pool::DbKind;
 use relus_common::{ApiConfig, JobConfig};
+use relus_connector_rdbms::pool::detect_db_kind;
+use relus_connector_rdbms::pool::DbKind;
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;

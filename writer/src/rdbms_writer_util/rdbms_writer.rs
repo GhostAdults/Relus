@@ -1,12 +1,12 @@
 //! RDBMS Writer 核心实现
 //!
-//! 提��关系型数据库写入功能，支持 PostgreSQL 和 MySQL
+//! 提供关系型数据库写入功能，支持 PostgreSQL 和 MySQL
 
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use relus_common::db::pool::{DbKind, DbPool};
-use relus_common::db::util::get_pool_from_output;
+use relus_connector_rdbms::pool::{DbKind, RdbmsPool};
+use relus_connector_rdbms::util::get_pool_from_output;
 
 use relus_common::pipeline::{DbBatch, PipelineMessage};
 use relus_common::types::UnifiedValue;
@@ -69,8 +69,8 @@ where
     async fn execute_task(&self, task: WriteTask, mut rx: mpsc::Receiver<M>) -> Result<usize> {
         let pool = get_pool_from_output(&self.original_config).await?;
         let db_kind = match pool.as_ref() {
-            DbPool::Postgres(_) => DbKind::Postgres,
-            DbPool::Mysql(_) => DbKind::Mysql,
+            RdbmsPool::Postgres(_) => DbKind::Postgres,
+            RdbmsPool::Mysql(_) => DbKind::Mysql,
         };
         let mut written = 0;
 
@@ -112,7 +112,7 @@ pub trait RowWriter<M>: Send + Sync {
     async fn process_message(
         &self,
         msg: &M,
-        pool: &Arc<DbPool>,
+        pool: &Arc<RdbmsPool>,
         config: &RdbmsConfig,
         db_kind: DbKind,
         task: &WriteTask,
@@ -127,7 +127,7 @@ impl RowWriter<PipelineMessage> for PipelineRowWriter {
     async fn process_message(
         &self,
         msg: &PipelineMessage,
-        pool: &Arc<DbPool>,
+        pool: &Arc<RdbmsPool>,
         config: &RdbmsConfig,
         _db_kind: DbKind,
         task: &WriteTask,
@@ -257,7 +257,7 @@ pub fn build_base_sql(
 /// 执行数据库写入（批量模式)
 pub async fn execute_db_write(
     batch: &DbBatch,
-    pool: &Arc<DbPool>,
+    pool: &Arc<RdbmsPool>,
     batch_size: usize,
 ) -> Result<usize> {
     let total_rows = batch.rows.len();
@@ -278,17 +278,17 @@ pub async fn execute_db_write(
 
 /// WriterTaskExecutor 实现
 pub struct RdbmsWriterExecutor {
-    pool: Arc<DbPool>,
+    pool: Arc<RdbmsPool>,
     config: RdbmsConfig,
     db_kind: DbKind,
     batch_size: usize,
 }
 
 impl RdbmsWriterExecutor {
-    pub fn new(pool: Arc<DbPool>, config: RdbmsConfig, batch_size: usize) -> Self {
+    pub fn new(pool: Arc<RdbmsPool>, config: RdbmsConfig, batch_size: usize) -> Self {
         let db_kind = match pool.as_ref() {
-            DbPool::Postgres(_) => DbKind::Postgres,
-            DbPool::Mysql(_) => DbKind::Mysql,
+            RdbmsPool::Postgres(_) => DbKind::Postgres,
+            RdbmsPool::Mysql(_) => DbKind::Mysql,
         };
         Self {
             pool,

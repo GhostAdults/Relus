@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::constant::schema::DEFAULT_SCHEMA_CACHE_DIR;
+use relus_common::constant::schema::DEFAULT_SCHEMA_CACHE_DIR;
 
 /// 表结构信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +164,10 @@ pub enum CompatibilityResult {
     /// 向后兼容（旧版本可读新数据）
     BackwardCompatible { changes: Vec<SchemaChange> },
     /// 破坏性变更
-    Breaking { reason: String, changes: Vec<SchemaChange> },
+    Breaking {
+        reason: String,
+        changes: Vec<SchemaChange>,
+    },
 }
 
 impl CompatibilityResult {

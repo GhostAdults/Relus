@@ -1,5 +1,5 @@
 [package]
-name = "relus_writer"
+name = "relus_connector_rdbms"
 version = { workspace = true }
 edition = { workspace = true }
 
@@ -8,17 +8,17 @@ path = "src/lib.rs"
 
 [dependencies]
 relus_common = { workspace = true }
-relus_connector_rdbms = { workspace = true }
+
 
 tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros"] }
+tokio = { workspace = true, features = ["sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+clap = { workspace = true }
+dashmap = "5"
+redb = "2"

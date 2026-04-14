@@ -10,6 +10,7 @@ path = "src/lib.rs"
 relus_reader = { workspace = true }
 relus_common = { workspace = true }
 relus_writer = { workspace = true }
+relus_connector_rdbms = { workspace = true }
 
 clap = { workspace = true }
 chrono = { workspace = true }

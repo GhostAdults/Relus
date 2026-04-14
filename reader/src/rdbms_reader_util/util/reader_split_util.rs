@@ -2,9 +2,9 @@ use crate::rdbms_reader_util::rdbms_reader::count_total_records;
 use crate::RdbmsJob;
 use anyhow::Result;
 use relus_common::constant::key::SPLIT_FACTOR;
-use relus_common::db::pool::{ColumnValue, DbKind, DbPool};
-use relus_common::db::util::{build_select_query_for, get_pool_from_config};
 use relus_common::interface::{ReadTask, SplitReaderResult};
+use relus_connector_rdbms::pool::{ColumnValue, DbKind, RdbmsPool};
+use relus_connector_rdbms::util::{build_select_query_for, get_pool_from_config};
 use serde_json::Value as JsonValue;
 use tracing::{info, warn};
 
@@ -54,8 +54,8 @@ pub async fn do_split(rdbms_job: &RdbmsJob, advice_number: usize) -> SplitReader
         .unwrap_or_default();
 
     let db_kind = match pool.as_ref() {
-        DbPool::Postgres(_) => DbKind::Postgres,
-        DbPool::Mysql(_) => DbKind::Mysql,
+        RdbmsPool::Postgres(_) => DbKind::Postgres,
+        RdbmsPool::Mysql(_) => DbKind::Mysql,
     };
 
     let mut tasks = Vec::new();
@@ -172,7 +172,7 @@ fn build_single_task(
 }
 
 async fn split_by_pk(
-    pool: &DbPool,
+    pool: &RdbmsPool,
     db_kind: DbKind,
     config: &crate::RdbmsConfig,
     split_pk: &str,
@@ -308,7 +308,7 @@ pub enum PkRange {
 }
 
 async fn get_pk_range(
-    pool: &DbPool,
+    pool: &RdbmsPool,
     table: &str,
     split_pk: &str,
     where_clause: Option<&str>,

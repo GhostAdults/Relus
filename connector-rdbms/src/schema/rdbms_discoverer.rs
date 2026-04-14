@@ -5,23 +5,23 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use crate::db::pool::{DbKind, DbPool};
+use crate::pool::{DbKind, RdbmsPool};
 
 use super::{ColumnInfo, MetadataDiscoverer, TableSchema, TypeMapper};
 
 /// RDBMS 元数据发现器
 pub struct RdbmsDiscoverer {
-    pool: Arc<DbPool>,
+    pool: Arc<RdbmsPool>,
     table_name: String,
     db_kind: DbKind,
     type_mapper: Box<dyn TypeMapper>,
 }
 
 impl RdbmsDiscoverer {
-    pub fn new(pool: Arc<DbPool>, table_name: String) -> Self {
+    pub fn new(pool: Arc<RdbmsPool>, table_name: String) -> Self {
         let db_kind = match pool.as_ref() {
-            DbPool::Postgres(_) => DbKind::Postgres,
-            DbPool::Mysql(_) => DbKind::Mysql,
+            RdbmsPool::Postgres(_) => DbKind::Postgres,
+            RdbmsPool::Mysql(_) => DbKind::Mysql,
         };
 
         let type_mapper: Box<dyn TypeMapper> = match db_kind {
@@ -58,8 +58,8 @@ impl RdbmsDiscoverer {
 
         // 使用 sqlx 直接查询
         let columns = match self.pool.as_ref() {
-            DbPool::Postgres(p) => self.query_columns_sqlx_pg(p, &sql).await?,
-            DbPool::Mysql(_) => {
+            RdbmsPool::Postgres(p) => self.query_columns_sqlx_pg(p, &sql).await?,
+            RdbmsPool::Mysql(_) => {
                 bail!("PostgreSQL pool expected")
             }
         };
@@ -124,10 +124,10 @@ impl RdbmsDiscoverer {
         );
 
         let columns = match self.pool.as_ref() {
-            DbPool::Postgres(_) => {
+            RdbmsPool::Postgres(_) => {
                 bail!("MySQL pool expected")
             }
-            DbPool::Mysql(p) => self.query_columns_sqlx_my(p, &sql).await?,
+            RdbmsPool::Mysql(p) => self.query_columns_sqlx_my(p, &sql).await?,
         };
 
         Ok(columns)
@@ -198,8 +198,8 @@ impl RdbmsDiscoverer {
         };
 
         let pks = match self.pool.as_ref() {
-            DbPool::Postgres(p) => self.query_pks_sqlx_pg(p, &sql).await?,
-            DbPool::Mysql(p) => self.query_pks_sqlx_my(p, &sql).await?,
+            RdbmsPool::Postgres(p) => self.query_pks_sqlx_pg(p, &sql).await?,
+            RdbmsPool::Mysql(p) => self.query_pks_sqlx_my(p, &sql).await?,
         };
 
         Ok(pks)
@@ -291,14 +291,14 @@ impl MetadataDiscoverer for RdbmsDiscoverer {
         };
 
         let result = match self.pool.as_ref() {
-            DbPool::Postgres(p) => {
+            RdbmsPool::Postgres(p) => {
                 let row: Option<(i32,)> = sqlx::query_as(sql)
                     .bind(table_name)
                     .fetch_optional(p)
                     .await?;
                 row.is_some()
             }
-            DbPool::Mysql(p) => {
+            RdbmsPool::Mysql(p) => {
                 let row: Option<(i32,)> = sqlx::query_as(sql)
                     .bind(table_name)
                     .fetch_optional(p)
@@ -321,11 +321,11 @@ impl MetadataDiscoverer for RdbmsDiscoverer {
         };
 
         let tables = match self.pool.as_ref() {
-            DbPool::Postgres(p) => {
+            RdbmsPool::Postgres(p) => {
                 let rows: Vec<(String,)> = sqlx::query_as(sql).fetch_all(p).await?;
                 rows.into_iter().map(|r| r.0).collect()
             }
-            DbPool::Mysql(p) => {
+            RdbmsPool::Mysql(p) => {
                 let rows: Vec<(String,)> = sqlx::query_as(sql).fetch_all(p).await?;
                 rows.into_iter().map(|r| r.0).collect()
             }

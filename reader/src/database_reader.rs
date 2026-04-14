@@ -6,9 +6,9 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::rdbms_reader_util::rdbms_reader::{RdbmsConfig, RdbmsJob};
-use relus_common::schema::SchemaDiscoveryConfig;
 use relus_common::JobConfig;
 use relus_common::PipelineMessage;
+use relus_connector_rdbms::schema::SchemaDiscoveryConfig;
 
 pub struct DatabaseJob {
     original_config: Arc<JobConfig>,

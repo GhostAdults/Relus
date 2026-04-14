@@ -15,11 +15,11 @@ use anyhow::Result;
 use axum::routing::{get, post};
 use relus_common::app_config::value::ConfigValue;
 use relus_common::data_source_config::{ApiConfig, DbConfig};
-use relus_common::db::pool::{get_pool_from_query, DbPool};
 use relus_common::job_config::{JobConfig, MappingConfig};
 use relus_common::resp::{ApiResp, ColInfo};
 use relus_common::resp::{DescribeQuery, GenMapQuery, TablesQuery};
 use relus_common::{CreateConfigReq, UpdateConfigReq};
+use relus_connector_rdbms::pool::{get_pool_from_query, RdbmsPool};
 use sqlx::{MySqlPool, PgPool, Row};
 use tokio::net::TcpListener;
 
@@ -152,7 +152,7 @@ pub async fn sync_cli(cfg: JobConfig) -> Result<RunResult> {
 pub async fn list_tables(q: TablesQuery) -> (StatusCode, Json<ApiResp<Vec<String>>>) {
     match get_pool_from_query(&q.base).await {
         Ok(pool) => match pool {
-            DbPool::Postgres(p) => match list_tables_postgres(&p).await {
+            RdbmsPool::Postgres(p) => match list_tables_postgres(&p).await {
                 Ok(tabs) => (
                     StatusCode::OK,
                     Json(ApiResp {
@@ -170,7 +170,7 @@ pub async fn list_tables(q: TablesQuery) -> (StatusCode, Json<ApiResp<Vec<String
                     }),
                 ),
             },
-            DbPool::Mysql(p) => match list_tables_mysql(&p).await {
+            RdbmsPool::Mysql(p) => match list_tables_mysql(&p).await {
                 Ok(tabs) => (
                     StatusCode::OK,
                     Json(ApiResp {
@@ -203,7 +203,7 @@ pub async fn list_tables(q: TablesQuery) -> (StatusCode, Json<ApiResp<Vec<String
 pub async fn describe(q: DescribeQuery) -> (StatusCode, Json<ApiResp<Vec<Value>>>) {
     match get_pool_from_query(&q.base).await {
         Ok(pool) => match pool {
-            DbPool::Postgres(p) => match fetch_columns_postgres(&p, &q.table).await {
+            RdbmsPool::Postgres(p) => match fetch_columns_postgres(&p, &q.table).await {
                 Ok(cols) => {
                     let v = cols.into_iter().map(|c| serde_json::json!({"name": c.name, "data_type": c.data_type, "nullable": c.is_nullable})).collect::<Vec<_>>();
                     (
@@ -224,7 +224,7 @@ pub async fn describe(q: DescribeQuery) -> (StatusCode, Json<ApiResp<Vec<Value>>
                     }),
                 ),
             },
-            DbPool::Mysql(p) => match fetch_columns_mysql(&p, &q.table).await {
+            RdbmsPool::Mysql(p) => match fetch_columns_mysql(&p, &q.table).await {
                 Ok(cols) => {
                     let v = cols.into_iter().map(|c| serde_json::json!({"name": c.name, "data_type": c.data_type, "nullable": c.is_nullable})).collect::<Vec<_>>();
                     (
@@ -261,8 +261,8 @@ pub async fn gen_mapping(q: GenMapQuery) -> (StatusCode, Json<ApiResp<Value>>) {
     match get_pool_from_query(&q.base).await {
         Ok(pool) => {
             let cols_res = match pool {
-                DbPool::Postgres(p) => fetch_columns_postgres(&p, &q.table).await,
-                DbPool::Mysql(p) => fetch_columns_mysql(&p, &q.table).await,
+                RdbmsPool::Postgres(p) => fetch_columns_postgres(&p, &q.table).await,
+                RdbmsPool::Mysql(p) => fetch_columns_mysql(&p, &q.table).await,
             };
             match cols_res {
                 Ok(cols) => {

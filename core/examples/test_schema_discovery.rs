@@ -4,13 +4,13 @@
 //! Schema 缓存持久化到磁盘
 
 use anyhow::Result;
-use relus_common::db::pool::DbPool;
-use relus_common::db::util::get_pool_from_config;
-use relus_common::schema::{
+use relus_common::JobConfig;
+use relus_connector_rdbms::pool::RdbmsPool;
+use relus_connector_rdbms::schema::{
     CompatibilityResult, EvolutionChecker, MetadataDiscoverer, RdbmsDiscoverer, SchemaCache,
     SchemaChange, TableSchema,
 };
-use relus_common::JobConfig;
+use relus_connector_rdbms::util::get_pool_from_config;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 const SCHEMA_CACHE_DIR: &str = "./schema_cache";
 
 /// 从配置创建数据库连接池
-async fn create_pool_from_config(config: &JobConfig) -> Result<Arc<DbPool>> {
+async fn create_pool_from_config(config: &JobConfig) -> Result<Arc<RdbmsPool>> {
     let pool = get_pool_from_config(config).await?;
     Ok(pool)
 }

@@ -1,18 +1,20 @@
-//! Database connection pool management
-//!
-//! Provides connection pooling for PostgreSQL and MySQL with caching support.
-
+/// 统一的 RDBMS 连接池
+//Database connection pool management
+//Provides connection pooling for PostgreSQL and MySQL with caching support.
+///
 use anyhow::Result;
+
 use async_trait::async_trait;
 use clap::ValueEnum;
 use dashmap::DashMap;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{MySqlPool, PgPool};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::util::{dbkind_from_opt_str, DbParams};
-use crate::types::UnifiedValue;
+use relus_common::types::UnifiedValue;
 
 // 向后兼容的类型别名
 #[allow(deprecated)]
@@ -27,7 +29,7 @@ pub enum DbKind {
 
 /// Database connection pool wrapper
 #[derive(Debug, Clone)]
-pub enum DbPool {
+pub enum RdbmsPool {
     Postgres(sqlx::PgPool),
     Mysql(sqlx::MySqlPool),
 }
@@ -41,9 +43,9 @@ pub struct PoolConfig {
     pub timeout_secs: Option<u64>,
 }
 
-static DB_POOLS: OnceLock<DashMap<PoolConfig, DbPool>> = OnceLock::new();
+static DB_POOLS: OnceLock<DashMap<PoolConfig, RdbmsPool>> = OnceLock::new();
 
-async fn create_pool(cfg: &PoolConfig) -> Result<DbPool> {
+async fn create_pool(cfg: &PoolConfig) -> Result<RdbmsPool> {
     let timeout = Duration::from_secs(cfg.timeout_secs.unwrap_or(30));
     match cfg.kind {
         DbKind::Postgres => {
@@ -52,7 +54,7 @@ async fn create_pool(cfg: &PoolConfig) -> Result<DbPool> {
                 .acquire_timeout(timeout)
                 .connect(&cfg.url)
                 .await?;
-            Ok(DbPool::Postgres(pool))
+            Ok(RdbmsPool::Postgres(pool))
         }
         DbKind::Mysql => {
             let pool = MySqlPoolOptions::new()
@@ -60,7 +62,7 @@ async fn create_pool(cfg: &PoolConfig) -> Result<DbPool> {
                 .acquire_timeout(timeout)
                 .connect(&cfg.url)
                 .await?;
-            Ok(DbPool::Mysql(pool))
+            Ok(RdbmsPool::Mysql(pool))
         }
     }
 }
@@ -72,8 +74,8 @@ pub async fn get_db_pool(
     kind: DbKind,
     max_conns: u32,
     timeout_secs: Option<u64>,
-) -> Result<DbPool> {
-    let pools: &DashMap<PoolConfig, DbPool> = DB_POOLS.get_or_init(|| DashMap::new());
+) -> Result<RdbmsPool> {
+    let pools: &DashMap<PoolConfig, RdbmsPool> = DB_POOLS.get_or_init(|| DashMap::new());
     let key = PoolConfig {
         kind,
         url: url.to_string(),
@@ -106,7 +108,7 @@ pub fn detect_db_kind(url: &str, explicit: Option<DbKind>) -> Result<DbKind> {
 }
 
 /// Get pool from DbParams query
-pub async fn get_pool_from_query<T: DbParams>(q: &T) -> Result<DbPool> {
+pub async fn get_pool_from_query<T: DbParams>(q: &T) -> Result<RdbmsPool> {
     let db_url = q.resolve_url()?;
     let kind = detect_db_kind(&db_url, dbkind_from_opt_str(&q.resolve_type()))?;
     get_db_pool(&db_url, kind, 5, None).await
@@ -408,12 +410,30 @@ fn bind_typed_val_my<'q>(
     q
 }
 
-impl DbPool {
+impl RdbmsPool {
     /// Get executor for database operations
     pub fn executor(&self) -> Box<dyn DbExecutor> {
         match self {
-            DbPool::Postgres(p) => Box::new(PgExecutorRef { pool: p.clone() }),
-            DbPool::Mysql(p) => Box::new(MySqlExecutorRef { pool: p.clone() }),
+            RdbmsPool::Postgres(p) => Box::new(PgExecutorRef { pool: p.clone() }),
+            RdbmsPool::Mysql(p) => Box::new(MySqlExecutorRef { pool: p.clone() }),
+        }
+    }
+    pub fn db_type(&self) -> &str {
+        match self {
+            Self::Postgres(_) => "postgres",
+            Self::Mysql(_) => "mysql",
+        }
+    }
+
+    pub async fn from_url(url: &str) -> Result<Self> {
+        if url.starts_with("postgres") {
+            let pool = PgPool::connect(url).await?;
+            Ok(Self::Postgres(pool))
+        } else if url.starts_with("mysql") {
+            let pool = MySqlPool::connect(url).await?;
+            Ok(Self::Mysql(pool))
+        } else {
+            Err(anyhow::anyhow!("不支持的数据库协议: {}", url))
         }
     }
 }

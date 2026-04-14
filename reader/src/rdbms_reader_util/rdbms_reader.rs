@@ -13,14 +13,14 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use relus_common::db::pool::DbPool;
-use relus_common::db::util::{build_query_sql, get_pool_from_config};
 use relus_common::interface::{ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
 use relus_common::pipeline::RecordBuilder;
-use relus_common::schema::{MetadataDiscoverer, RdbmsDiscoverer, TableSchema};
 use relus_common::types::SourceType;
 use relus_common::JobConfig;
 use relus_common::PipelineMessage;
+use relus_connector_rdbms::pool::RdbmsPool;
+use relus_connector_rdbms::schema::{MetadataDiscoverer, RdbmsDiscoverer, TableSchema};
+use relus_connector_rdbms::util::{build_query_sql, get_pool_from_config};
 
 /// RDBMS 读取配置
 #[derive(Debug, Clone)]
@@ -197,11 +197,11 @@ impl<'a> DbRowStream<'a> {
 }
 
 /// 执行流式查询
-pub fn execute_query_stream<'a>(pool: &'a DbPool, sql: &'a str) -> Result<DbRowStream<'a>> {
+pub fn execute_query_stream<'a>(pool: &'a RdbmsPool, sql: &'a str) -> Result<DbRowStream<'a>> {
     use sqlx::{Column, Row};
 
     let stream: JsonStream<'a> = match pool {
-        DbPool::Postgres(pg_pool) => Box::pin(sqlx::query(sql).fetch(pg_pool).map(|result| {
+        RdbmsPool::Postgres(pg_pool) => Box::pin(sqlx::query(sql).fetch(pg_pool).map(|result| {
             result.map(|row: sqlx::postgres::PgRow| {
                 let mut obj = serde_json::Map::new();
                 for (idx, col) in row.columns().iter().enumerate() {
@@ -215,7 +215,7 @@ pub fn execute_query_stream<'a>(pool: &'a DbPool, sql: &'a str) -> Result<DbRowS
                 JsonValue::Object(obj)
             })
         })),
-        DbPool::Mysql(my_pool) => Box::pin(sqlx::query(sql).fetch(my_pool).map(|result| {
+        RdbmsPool::Mysql(my_pool) => Box::pin(sqlx::query(sql).fetch(my_pool).map(|result| {
             result.map(|row: sqlx::mysql::MySqlRow| {
                 let mut obj = serde_json::Map::new();
                 for (idx, col) in row.columns().iter().enumerate() {
@@ -235,7 +235,11 @@ pub fn execute_query_stream<'a>(pool: &'a DbPool, sql: &'a str) -> Result<DbRowS
 }
 
 // 获取当前表数据count
-pub async fn count_total_records(pool: &DbPool, table: &str, query: Option<&str>) -> Result<usize> {
+pub async fn count_total_records(
+    pool: &RdbmsPool,
+    table: &str,
+    query: Option<&str>,
+) -> Result<usize> {
     let sql = if let Some(custom_query) = query {
         format!("SELECT COUNT(*) FROM ({}) AS subquery", custom_query)
     } else {

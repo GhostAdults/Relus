@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 relus_common = { workspace = true }
+relus_connector_rdbms = { workspace = true }
 
 clap = { workspace = true }
 tracing = { workspace = true }

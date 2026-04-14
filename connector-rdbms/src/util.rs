@@ -5,10 +5,10 @@
 use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 
-use super::pool::{detect_db_kind, get_db_pool, DbKind, DbPool};
-use crate::data_source_config::DataSourceConfig;
-use crate::job_config::JobConfig;
-use crate::resp::BaseDbQuery;
+use super::pool::{detect_db_kind, get_db_pool, DbKind, RdbmsPool};
+use relus_common::data_source_config::DataSourceConfig;
+use relus_common::job_config::JobConfig;
+use relus_common::resp::BaseDbQuery;
 
 /// Database parameters trait for resolving connection info
 pub trait DbParams {
@@ -44,7 +44,7 @@ impl DbParams for BaseDbQuery {
 }
 
 /// Get database pool from DataSourceConfig (input or output)
-pub async fn get_pool_for(ds: &DataSourceConfig) -> Result<Arc<DbPool>> {
+pub async fn get_pool_for(ds: &DataSourceConfig) -> Result<Arc<RdbmsPool>> {
     let db_config = ds.parse_database_config()?;
     let db_type_str = ds.get_source_db_type();
 
@@ -69,12 +69,12 @@ pub async fn get_pool_for(ds: &DataSourceConfig) -> Result<Arc<DbPool>> {
 }
 
 /// Get database pool from JobConfig input
-pub async fn get_pool_from_config(cfg: &JobConfig) -> Result<Arc<DbPool>> {
+pub async fn get_pool_from_config(cfg: &JobConfig) -> Result<Arc<RdbmsPool>> {
     get_pool_for(&cfg.input).await
 }
 
 /// Get database pool from JobConfig output
-pub async fn get_pool_from_output(cfg: &JobConfig) -> Result<Arc<DbPool>> {
+pub async fn get_pool_from_output(cfg: &JobConfig) -> Result<Arc<RdbmsPool>> {
     get_pool_for(&cfg.output).await
 }
 
