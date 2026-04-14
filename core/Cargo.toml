@@ -1,0 +1,46 @@
+[package]
+name = "relus_core"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+relus_reader = { workspace = true }
+relus_common = { workspace = true }
+relus_writer = { workspace = true }
+
+clap = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+# flutter_rust_bridge ={ workspace = true}
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+rand = { workspace = true }
+sqlx = { workspace = true }
+regex = { workspace = true }
+indicatif = { workspace = true }
+toml = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+config = { version = "0.15.19", features = ["json"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+
+[dev-dependencies]
+tempfile = "3.24.0"
+criterion = { version = "0.5", features = ["async_futures"] }
+
+[[bench]]
+name = "async_trait_overhead"
+harness = false
+
+[[bench]]
+name = "pipeline_throughput"
+harness = false

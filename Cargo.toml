@@ -1,13 +1,7 @@
 [workspace]
 
-members = [
-    "data_trans_core",
-    "data_trans_cli",
-    "data_trans_reader",
-    "data_trans_common",
-    "data_trans_writer",
-]
-resolver = "2"
+members = ["core", "cli", "reader", "common", "writer"]
+resolver = "3"
 
 [workspace.package]
 name = "relus"
@@ -28,6 +22,12 @@ lto = true        # 启用链接时优化
 codegen-units = 1 # 减少代码生成单元以提高性能
 
 [workspace.dependencies]
+relus_core = { path = "core" }
+relus_common = { path = "common" }
+relus_reader = { path = "reader" }
+relus_writer = { path = "writer" }
+
+
 toml = "0.8"
 futures = "0.3"
 async-trait = "0.1"

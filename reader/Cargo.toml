@@ -1,0 +1,27 @@
+[package]
+name = "relus_reader"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+relus_common = { workspace = true }
+
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dashmap = "5"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+futures = { workspace = true }
+num-bigint = "0.4"
+num-traits = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }

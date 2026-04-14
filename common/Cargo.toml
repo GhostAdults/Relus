@@ -1,0 +1,24 @@
+[package]
+name = "relus_common"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+nom = "7.1"
+config = { version = "0.15.19", features = ["json"] }
+dirs-next = "2.0"
+notify = "6.1"
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+dashmap = "5"
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+rust_decimal = { workspace = true }
+redb = "2"
+tracing = "0.1"
+tracing-subscriber = { workspace = true }

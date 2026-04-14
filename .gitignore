@@ -31,7 +31,7 @@ logs/
 # The .vscode folder contains launch configuration and tasks you configure in
 # VS Code which you may wish to be included in version control, so this line
 # is commented out by default.
-#.vscode/
+.vscode/
 
 # Flutter/Dart/Pub related
 **/doc/api/
@@ -59,3 +59,9 @@ my_app/android/app/release
 my_app/macos/app/debug
 my_app/macos/app/profile
 my_app/macos/app/release
+
+
+# ai agent tools
+.claude
+###
+schema_cache.*

@@ -1,0 +1,47 @@
+{
+  "id": "default",
+  "input": {
+    "name": "db_source",
+    "type": "database",
+    "config": {
+      "split_pk": "id",
+      "connections": [
+        {
+          "db_type": "mysql",
+          "url": "mysql://root:123456@127.0.0.1:3306/my_db",
+          "table": "user_x",
+          "key_columns": ["id"],
+          "max_connections": 20,
+          "acquire_timeout_secs": 30,
+          "use_transaction": true
+        }
+      ]
+    }
+  },
+  "output": {
+    "name": "db_target",
+    "type": "database",
+    "config": {
+      "connection": {
+        "db_type": "postgres",
+        "url": "postgres://postgres:123456@127.0.0.1:5432/postgres",
+        "table": "user_w",
+        "key_columns": ["id"],
+        "max_connections": 20,
+        "acquire_timeout_secs": 30,
+        "use_transaction": true
+      }
+    }
+  },
+  "column_mapping": {
+    "userAccount": "expr: 'IMPORTED'",
+    "userPassword": "userPassword"
+  },
+  "column_types": {
+    "userAccount": "string",
+    "userPassword": "string"
+  },
+  "mode": "insert",
+  "batch_size": 12000,
+  "channel_buffer_size": 12000
+}

@@ -692,99 +692,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data_trans_common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "config",
- "dashmap",
- "dirs-next",
- "nom",
- "notify",
- "parking_lot",
- "redb",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "data_trans_core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "config",
- "criterion",
- "data_trans_common",
- "data_trans_reader",
- "data_trans_writer",
- "futures",
- "indicatif",
- "parking_lot",
- "rand 0.10.0",
- "regex",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml 0.8.2",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "data_trans_reader"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dashmap",
- "data_trans_common",
- "futures",
- "num-bigint",
- "num-traits",
- "reqwest",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "data_trans_writer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "data_trans_common",
- "data_trans_reader",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2407,16 +2314,105 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
-name = "relus-cli"
+name = "relus_cli"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "relus_common",
+ "relus_core",
+]
+
+[[package]]
+name = "relus_common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "chrono",
  "clap",
- "data_trans_common",
- "data_trans_core",
+ "config",
+ "dashmap",
+ "dirs-next",
+ "nom",
+ "notify",
+ "parking_lot",
+ "redb",
+ "rust_decimal",
+ "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "relus_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "config",
+ "criterion",
+ "futures",
+ "indicatif",
+ "parking_lot",
+ "rand 0.10.0",
+ "regex",
+ "relus_common",
+ "relus_reader",
+ "relus_writer",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "relus_reader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dashmap",
+ "futures",
+ "num-bigint",
+ "num-traits",
+ "relus_common",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "relus_writer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "relus_common",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

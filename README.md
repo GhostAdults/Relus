@@ -1,4 +1,4 @@
-"# data-sync-trans"
+"# data sync transport tools"
 
 # Relus
 
@@ -7,7 +7,7 @@
 cd Relus
 
 ```bash
-cargo build --release --bin data_trans_cli
+cargo build --release --bin cli
 ```
 or
 ```bash
@@ -18,9 +18,9 @@ cargo packager --release
 
 ```bash
 # debug
-cargo run -p data_trans_cli -- sync -c data_trans_cli/user_config/default_job.
+cargo run -p relus_cli -- sync -c cli/user_config/default_job.
 # 或者
-cargo run --manifest-path data_trans_cli/Cargo.toml -- sync -c xxxYourJobLocation/xxx/default_job.json
+cargo run --manifest-path cli/Cargo.toml -- sync -c xxxYourJobLocation/xxx/default_job.json
 
 # release
 ./target/release//relus-cli sync -c xxxYourJobLocation/xxx/default_job.json

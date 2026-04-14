@@ -1,0 +1,22 @@
+[package]
+name = "relus_cli"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+
+
+[package.metadata.packager]
+# 1. 全局配置
+formats = ["nsis"]
+before-packaging-command = "cargo build --release"
+# # 如果有资源文件，也放在这里
+# resources = ["configs/**/*"]
+
+[[bin]]
+name = "relus_cli"
+path = "src/main.rs"
+
+[dependencies]
+relus_core = { workspace = true }
+relus_common = { workspace = true }
+clap = { workspace = true }
