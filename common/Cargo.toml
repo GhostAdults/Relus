@@ -21,3 +21,4 @@ tokio = { workspace = true, features = ["sync"] }
 rust_decimal = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { workspace = true }
+inventory = { workspace = true }

@@ -1,6 +1,8 @@
 //! Database Writer 包装层
 //!
-//! 包装 RdbmsJob 提供统一的 DatabaseJob 接口
+//! `DatabaseWriter` 持有 `DatabaseJob`，`WriterJob` trait 实现在 Writer 上。
+//! `DatabaseJob` 负责业务逻辑（配置构建），
+//! `DatabaseWriter` 负责生命周期管理和 pipeline 对接。
 
 use std::sync::Arc;
 
@@ -9,13 +11,25 @@ use relus_common::pipeline::PipelineMessage;
 use relus_common::JobConfig;
 use tokio::sync::mpsc;
 
-use crate::rdbms_writer_util::rdbms_writer::{PipelineRowWriter, RdbmsConfig, RdbmsJob};
+use crate::rdbms_writer_util::rdbms_writer::{
+    PipelineRowWriter, RdbmsConfig, RdbmsJob, RdbmsWriter,
+};
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use relus_common::interface::{SplitWriterResult, WriteMode, WriteTask, WriterJob};
+use relus_common::interface::{SplitWriterResult, WriteMode, WriteTask, WriterJob, WriterTask};
 
-/// Database Writer Job
+pub struct DatabaseWriter {
+    job: DatabaseJob,
+}
+
 pub struct DatabaseJob {
     original_config: Arc<JobConfig>,
+}
+
+impl DatabaseWriter {
+    pub fn init(config: Arc<JobConfig>) -> Result<Self> {
+        let job = DatabaseJob::new(config)?;
+        Ok(Self { job })
+    }
 }
 
 impl DatabaseJob {
@@ -48,35 +62,35 @@ impl DatabaseJob {
         })
     }
 
-    fn build_rdbms_job(&self) -> Result<RdbmsJob<PipelineMessage>> {
+    fn build_rdbms_writer(&self) -> Result<RdbmsWriter> {
         let config = self.build_rdbms_config()?;
         let writer = Arc::new(PipelineRowWriter);
 
-        Ok(RdbmsJob::new(
-            Arc::clone(&self.original_config),
-            config,
-            writer,
-        ))
+        let job = RdbmsJob::new(Arc::clone(&self.original_config), config, writer);
+
+        Ok(RdbmsWriter::from_job(job))
     }
 }
 
 #[async_trait::async_trait]
-impl WriterJob<PipelineMessage> for DatabaseJob {
+impl WriterJob for DatabaseWriter {
     async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult> {
-        let rdbms_job = self.build_rdbms_job()?;
-        rdbms_job.split(writer_threads).await
+        let rdbms_writer = self.job.build_rdbms_writer()?;
+        rdbms_writer.split(writer_threads).await
     }
+    fn description(&self) -> String {
+        format!("{}", self.job.original_config.output.name)
+    }
+}
 
-    async fn execute_task(
+#[async_trait::async_trait]
+impl WriterTask for DatabaseWriter {
+    async fn write_data(
         &self,
         task: WriteTask,
         rx: mpsc::Receiver<PipelineMessage>,
     ) -> Result<usize> {
-        let rdbms_job = self.build_rdbms_job()?;
-        rdbms_job.execute_task(task, rx).await
-    }
-
-    fn description(&self) -> String {
-        format!("{}", self.original_config.output.name)
+        let rdbms_writer = self.job.build_rdbms_writer()?;
+        rdbms_writer.write_data(task, rx).await
     }
 }

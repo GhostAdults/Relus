@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+inventory = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

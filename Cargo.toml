@@ -50,6 +50,7 @@ indicatif = "0.17"
 anyhow = "1.0"
 axum = "0.7"
 rand = "0.10"
+inventory = "0.3"
 sqlx = { version = "0.7", default-features = false, features = [
     "runtime-tokio-rustls",
     "runtime-tokio",

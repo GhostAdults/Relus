@@ -1,5 +1,5 @@
 use crate::rdbms_reader_util::rdbms_reader::count_total_records;
-use crate::RdbmsJob;
+use crate::rdbms_reader_util::rdbms_reader::RdbmsJob;
 use anyhow::Result;
 use relus_common::constant::key::SPLIT_FACTOR;
 use relus_common::interface::{ReadTask, SplitReaderResult};

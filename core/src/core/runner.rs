@@ -11,9 +11,8 @@ use relus_common::constant::pipeline::{
     DEFAULT_BATCH_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_CHANNEL_NUMBER, DEFAULT_PER_GROUP_CHANNEL,
     DEFAULT_READER_THREADS,
 };
-use relus_common::interface::{ReaderJob, WriterJob};
+use relus_common::interface::{Reader, Writer};
 use relus_common::job_config::JobConfig;
-use relus_common::pipeline::PipelineMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -143,11 +142,7 @@ impl Runner {
     }
 
     /// 执行同步任务
-    pub async fn run(
-        &self,
-        reader: Box<dyn ReaderJob>,
-        writer: Box<dyn WriterJob<PipelineMessage>>,
-    ) -> Result<RunResult> {
+    pub async fn run(&self, reader: Box<dyn Reader>, writer: Box<dyn Writer>) -> Result<RunResult> {
         let start_time = Instant::now();
         let pipeline_config = self.config.to_pipeline_config();
         let pipeline_stats = run_pipeline(pipeline_config, reader, writer).await?;

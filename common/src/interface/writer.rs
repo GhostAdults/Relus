@@ -19,7 +19,7 @@
 //! `database_writer` 是内置的参考实现，对应关系型数据库写入目标。
 //!
 use crate::job_config::JobConfig;
-use crate::pipeline;
+use crate::PipelineMessage;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -63,16 +63,9 @@ impl WriteMode {
 }
 
 #[async_trait::async_trait]
-pub trait WriterJob<M>: Send + Sync
-where
-    M: Send + 'static,
-{
+pub trait WriterJob: Send + Sync {
     /// 切分 Writer 任务，返回 writer_threads 个 WriteTask
     async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult>;
-
-    /// 执行单个 Writer 任务，从 Channel 接收数据并写入
-    async fn execute_task(&self, task: WriteTask, rx: mpsc::Receiver<M>) -> Result<usize>;
-
     /// 返回描述信息
     fn description(&self) -> String;
 }
@@ -80,5 +73,17 @@ where
 /// WriterTask trait
 #[async_trait::async_trait]
 pub trait WriterTask: Send + Sync {
-    async fn write_batch(&self, rows: &[pipeline::Record]) -> Result<usize>;
+    /// 按批次执行 Writer 任务，从 Channel 接收数据并写入
+    async fn write_data(
+        &self,
+        task: WriteTask,
+        rx: mpsc::Receiver<PipelineMessage>,
+    ) -> Result<usize>;
 }
+
+//  Writer = WriterJob + WriterTask
+#[async_trait::async_trait]
+pub trait Writer: WriterJob + WriterTask {}
+
+#[async_trait::async_trait]
+impl<T: WriterJob + WriterTask> Writer for T {}

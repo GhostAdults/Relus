@@ -12,7 +12,7 @@ use relus_common::constant::pipeline::{
     DEFAULT_BATCH_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_CHANNEL_NUMBER, DEFAULT_PER_GROUP_CHANNEL,
     DEFAULT_READER_THREADS,
 };
-use relus_common::interface::{ReadTask, ReaderJob, WriteTask, WriterJob};
+use relus_common::interface::{ReadTask, Reader, WriteTask, Writer};
 use relus_common::pipeline::PipelineMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -140,18 +140,18 @@ impl PipelineStats {
 /// 执行管道：Reader → Writer 1:1
 pub async fn run_pipeline(
     config: PipelineConfig,
-    reader: Box<dyn ReaderJob>,
-    writer: Box<dyn WriterJob<PipelineMessage>>,
+    reader: Box<dyn Reader>,
+    writer: Box<dyn Writer>,
 ) -> Result<PipelineStats> {
-    let reader: Arc<dyn ReaderJob> = Arc::from(reader);
-    let writer: Arc<dyn WriterJob<PipelineMessage>> = Arc::from(writer);
+    let reader: Arc<dyn Reader> = Arc::from(reader);
+    let writer: Arc<dyn Writer> = Arc::from(writer);
     run_paired_pipeline(&config, reader, writer).await
 }
 
 async fn run_task_pair(
     pair_id: usize,
-    reader: Arc<dyn ReaderJob>,
-    writer: Arc<dyn WriterJob<PipelineMessage>>,
+    reader: Arc<dyn Reader>,
+    writer: Arc<dyn Writer>,
     read_task: ReadTask,
     write_task: WriteTask,
     buffer_size: usize,
@@ -163,7 +163,7 @@ async fn run_task_pair(
     let cancel_r = Arc::clone(&cancel);
     let r_handle = tokio::spawn(async move {
         tokio::select! {
-            result = r.execute_task(read_task, tx.clone()) => {
+            result = r.read_data(&read_task, &tx) => {
                 match &result {
                     Ok(_) => {
                         let _ = tx.send(PipelineMessage::ReaderFinished).await;
@@ -187,7 +187,7 @@ async fn run_task_pair(
     let cancel_w = Arc::clone(&cancel);
     let w_handle = tokio::spawn(async move {
         tokio::select! {
-            result = w.execute_task(write_task, rx) => {
+            result = w.write_data(write_task, rx) => {
                 if let Err(ref e) = result {
                     error!("Writer-{} 失败: {}", pair_id, e);
                     cancel_w.notify_waiters();
@@ -247,8 +247,8 @@ async fn run_task_group(
     group_id: usize,
     tasks: Vec<(usize, ReadTask, WriteTask)>,
     concurrency: usize,
-    reader: Arc<dyn ReaderJob>,
-    writer: Arc<dyn WriterJob<PipelineMessage>>,
+    reader: Arc<dyn Reader>,
+    writer: Arc<dyn Writer>,
     buffer_size: usize,
     cancel: Arc<Notify>,
     reader_bar: indicatif::ProgressBar,
@@ -328,8 +328,8 @@ async fn run_task_group(
 /// 1:1 Pair
 async fn run_paired_pipeline(
     config: &PipelineConfig,
-    reader: Arc<dyn ReaderJob>,
-    writer: Arc<dyn WriterJob<PipelineMessage>>,
+    reader: Arc<dyn Reader>,
+    writer: Arc<dyn Writer>,
 ) -> Result<PipelineStats> {
     let start_time = Instant::now();
 

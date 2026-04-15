@@ -1,5 +1,9 @@
 pub mod core;
 
+// 确保 inventory::submit! 被 core 链接
+use relus_reader as _;
+use relus_writer as _;
+
 use anyhow::Result;
 use parking_lot::RwLock;
 use relus_common::app_config::config_loader::{

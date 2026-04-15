@@ -52,12 +52,6 @@ pub struct SplitReaderResult {
 pub trait ReaderJob: Send + Sync {
     /// 切分任务
     async fn split(&self, reader_threads: usize) -> Result<SplitReaderResult>;
-    /// 执行单个分片任务
-    async fn execute_task(
-        &self,
-        task: ReadTask,
-        tx: mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize>;
     /// 返回描述信息
     fn description(&self) -> String;
 }
@@ -67,7 +61,15 @@ pub trait ReaderJob: Send + Sync {
 /// 底层读取接口，由具体数据源实现
 #[async_trait::async_trait]
 pub trait ReaderTask: Send + Sync {
+    /// execute_task 内部调用的读取接口，负责读取数据并发送到 Channel
     /// 读取数据并发送到 Channel
     async fn read_data(&self, task: &ReadTask, tx: &mpsc::Sender<PipelineMessage>)
         -> Result<usize>;
 }
+
+//  trait
+#[async_trait::async_trait]
+pub trait Reader: ReaderJob + ReaderTask {}
+
+#[async_trait::async_trait]
+impl<T: ReaderJob + ReaderTask> Reader for T {}

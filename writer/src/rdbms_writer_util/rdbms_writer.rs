@@ -28,24 +28,50 @@ pub struct RdbmsConfig {
     pub batch_size: usize,
 }
 
-/// RDBMS Writer Job
-pub struct RdbmsJob<M>
-where
-    M: Send + Sync + 'static,
-{
-    pub original_config: Arc<JobConfig>,
-    pub config: RdbmsConfig,
-    pub writer: Arc<dyn RowWriter<M> + Send + Sync>,
+/// RDBMS Writer
+pub struct RdbmsWriter {
+    job: RdbmsJob,
 }
 
-impl<M> RdbmsJob<M>
-where
-    M: Send + Sync + 'static,
-{
+impl RdbmsWriter {
+    pub fn init(
+        original_config: Arc<JobConfig>,
+        config: RdbmsConfig,
+        writer: Arc<dyn RowWriter + Send + Sync>,
+    ) -> Result<Self> {
+        let job = RdbmsJob::new(original_config, config, writer);
+        Ok(Self { job })
+    }
+
+    pub fn from_job(job: RdbmsJob) -> Self {
+        Self { job }
+    }
+}
+
+#[async_trait::async_trait]
+impl WriterJob for RdbmsWriter {
+    async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult> {
+        let result = writer_split_util::do_split(&self.job.original_config, writer_threads);
+        Ok(result)
+    }
+
+    fn description(&self) -> String {
+        format!("RdbmsWriter (table: {})", self.job.config.table)
+    }
+}
+
+/// RDBMS Writer Job 业务逻辑
+pub struct RdbmsJob {
+    pub original_config: Arc<JobConfig>,
+    pub config: RdbmsConfig,
+    pub writer: Arc<dyn RowWriter>,
+}
+
+impl RdbmsJob {
     pub fn new(
         original_config: Arc<JobConfig>,
         config: RdbmsConfig,
-        writer: Arc<dyn RowWriter<M> + Send + Sync>,
+        writer: Arc<dyn RowWriter>,
     ) -> Self {
         Self {
             original_config,
@@ -55,63 +81,12 @@ where
     }
 }
 
-/// Job 实现
-#[async_trait::async_trait]
-impl<M> WriterJob<M> for RdbmsJob<M>
-where
-    M: Send + Sync + 'static,
-{
-    async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult> {
-        let result = writer_split_util::do_split(&self.original_config, writer_threads);
-        Ok(result)
-    }
-
-    async fn execute_task(&self, task: WriteTask, mut rx: mpsc::Receiver<M>) -> Result<usize> {
-        let pool = get_pool_from_output(&self.original_config).await?;
-        let db_kind = match pool.as_ref() {
-            RdbmsPool::Postgres(_) => DbKind::Postgres,
-            RdbmsPool::Mysql(_) => DbKind::Mysql,
-        };
-        let mut written = 0;
-
-        while let Some(msg) = rx.recv().await {
-            match self
-                .writer
-                .process_message(&msg, &pool, &self.config, db_kind, &task)
-                .await
-            {
-                Ok(count) => {
-                    written += count;
-                    if count > 0 {
-                        info!(
-                            "Writer-{} 写入中 {} 条数据（累计：{}）",
-                            task.task_id, count, written
-                        );
-                    }
-                }
-                Err(e) => {
-                    error!("Writer-{} 写入失败: {}", task.task_id, e);
-                    // 直接返回错误，停止写入
-                    bail!("Writer-{} 写入失败: {}", task.task_id, e);
-                }
-            }
-        }
-
-        info!("Writer-{} 完成，共写入 {} 条数据", task.task_id, written);
-        Ok(written)
-    }
-
-    fn description(&self) -> String {
-        format!("RdbmsJob (table: {})", self.config.table)
-    }
-}
-
 /// Row Writer trait - 处理消息并写入
 #[async_trait::async_trait]
-pub trait RowWriter<M>: Send + Sync {
+pub trait RowWriter: Send + Sync {
     async fn process_message(
         &self,
-        msg: &M,
+        msg: &PipelineMessage,
         pool: &Arc<RdbmsPool>,
         config: &RdbmsConfig,
         db_kind: DbKind,
@@ -123,7 +98,7 @@ pub trait RowWriter<M>: Send + Sync {
 pub struct PipelineRowWriter;
 
 #[async_trait::async_trait]
-impl RowWriter<PipelineMessage> for PipelineRowWriter {
+impl RowWriter for PipelineRowWriter {
     async fn process_message(
         &self,
         msg: &PipelineMessage,
@@ -297,10 +272,6 @@ impl RdbmsWriterExecutor {
             batch_size,
         }
     }
-}
-
-#[async_trait::async_trait]
-impl WriterTask for RdbmsWriterExecutor {
     async fn write_batch(&self, rows: &[MappingRow]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -313,5 +284,46 @@ impl WriterTask for RdbmsWriterExecutor {
             self.db_kind,
         )?;
         execute_db_write(&batch, &self.pool, self.batch_size).await
+    }
+}
+
+#[async_trait::async_trait]
+impl WriterTask for RdbmsWriter {
+    async fn write_data(
+        &self,
+        task: WriteTask,
+        mut rx: mpsc::Receiver<PipelineMessage>,
+    ) -> Result<usize> {
+        let pool = get_pool_from_output(&self.job.original_config).await?;
+        let db_kind = match pool.as_ref() {
+            RdbmsPool::Postgres(_) => DbKind::Postgres,
+            RdbmsPool::Mysql(_) => DbKind::Mysql,
+        };
+        let mut written = 0;
+
+        while let Some(msg) = rx.recv().await {
+            match self
+                .job
+                .writer
+                .process_message(&msg, &pool, &self.job.config, db_kind, &task)
+                .await
+            {
+                Ok(count) => {
+                    written += count;
+                    if count > 0 {
+                        info!(
+                            "Writer-{} 写入中 {} 条数据（累计：{}）",
+                            task.task_id, count, written
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Writer-{} 写入失败: {}", task.task_id, e);
+                    bail!("Writer-{} 写入失败: {}", task.task_id, e);
+                }
+            }
+        }
+        info!("Writer-{} 完成，共写入 {} 条数据", task.task_id, written);
+        Ok(written)
     }
 }

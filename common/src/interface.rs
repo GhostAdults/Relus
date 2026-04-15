@@ -1,6 +1,6 @@
-mod reader;
-mod registry;
-mod writer;
+pub mod reader;
+pub mod registry;
+pub mod writer;
 
 pub use reader::*;
 pub use registry::GlobalRegistry;

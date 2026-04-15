@@ -1,21 +1,34 @@
 //! 数据源注册表
 //!
-//! 使用函数指针模式注册 Reader/Writer 创建器，支持动态扩展。
-//! GlobalRegistry 定义在 common crate 中，供 Reader/Writer crate 自注册。
+//! 使用 `inventory` 实现编译期自注册。各 Reader/Writer crate 通过 `inventory::submit!`
+//! 提交注册函数，core 通过 `collect_and_register()` 一次性收集，无需硬编码依赖。
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::interface::{ReaderJob, WriterJob};
+use crate::interface::{Reader, Writer};
 use crate::job_config::JobConfig;
-use crate::pipeline::PipelineMessage;
 use anyhow::Result;
 
 /// Reader 创建函数类型
-pub type ReaderCreator = fn(Arc<JobConfig>) -> Result<Box<dyn ReaderJob>>;
+pub type ReaderCreator = fn(Arc<JobConfig>) -> Result<Box<dyn Reader>>;
 
 /// Writer 创建函数类型
-pub type WriterCreator = fn(Arc<JobConfig>) -> Result<Box<dyn WriterJob<PipelineMessage>>>;
+pub type WriterCreator = fn(Arc<JobConfig>) -> Result<Box<dyn Writer>>;
+
+/// Reader 插件（由各 reader crate 通过 `inventory::submit!` 注册）
+pub struct ReaderPlugin {
+    pub register: fn(&GlobalRegistry),
+}
+
+inventory::collect!(ReaderPlugin);
+
+/// Writer 插件
+pub struct WriterPlugin {
+    pub register: fn(&GlobalRegistry),
+}
+
+inventory::collect!(WriterPlugin);
 
 /// 全局注册表
 pub struct GlobalRegistry {
@@ -24,13 +37,23 @@ pub struct GlobalRegistry {
 }
 
 impl GlobalRegistry {
-    /// 获取全局单例（空注册表，需由外部调用 register 初始化）
+    /// 获取全局单例
     pub fn instance() -> &'static Self {
         static INSTANCE: OnceLock<GlobalRegistry> = OnceLock::new();
         INSTANCE.get_or_init(|| GlobalRegistry {
             readers: RwLock::new(HashMap::new()),
             writers: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// 从 inventory 收集所有已链接的 Reader/Writer 插件并注册
+    pub fn collect_and_register() {
+        for plugin in inventory::iter::<ReaderPlugin> {
+            (plugin.register)(Self::instance());
+        }
+        for plugin in inventory::iter::<WriterPlugin> {
+            (plugin.register)(Self::instance());
+        }
     }
 
     /// 注册 Reader 创建器
@@ -54,7 +77,7 @@ impl GlobalRegistry {
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Box<dyn ReaderJob>> {
+    ) -> Result<Box<dyn Reader>> {
         let readers = self.readers.read().unwrap();
         let creator = readers.get(source_type).ok_or_else(|| {
             anyhow::anyhow!(
@@ -71,7 +94,7 @@ impl GlobalRegistry {
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Box<dyn WriterJob<PipelineMessage>>> {
+    ) -> Result<Box<dyn Writer>> {
         let writers = self.writers.read().unwrap();
         let creator = writers.get(source_type).ok_or_else(|| {
             anyhow::anyhow!(

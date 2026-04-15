@@ -22,11 +22,7 @@ pub enum SourceType {
     S3,
     File,
     API,
-    Database {
-        query: String,
-        limit: Option<usize>,
-        offset: Option<usize>,
-    },
+    Database,
     Other(String),
 }
 
@@ -46,7 +42,7 @@ impl SourceType {
             SourceType::S3 => "s3",
             SourceType::File => "file",
             SourceType::API => "api",
-            SourceType::Database { .. } => "database",
+            SourceType::Database => "database",
             SourceType::Other(s) => s,
         }
     }
@@ -66,11 +62,7 @@ impl SourceType {
             "s3" => SourceType::S3,
             "file" => SourceType::File,
             "api" => SourceType::API,
-            "database" => SourceType::Database {
-                query: String::new(),
-                limit: None,
-                offset: None,
-            },
+            "database" => SourceType::Database,
             other => SourceType::Other(other.to_string()),
         }
     }
@@ -84,7 +76,7 @@ impl SourceType {
                 | SourceType::Oracle
                 | SourceType::SQLite
                 | SourceType::ClickHouse
-                | SourceType::Database { .. }
+                | SourceType::Database
         )
     }
 
@@ -107,48 +99,6 @@ impl SourceType {
         matches!(self, SourceType::API)
     }
 
-    pub fn database(query: String) -> Self {
-        SourceType::Database {
-            query,
-            limit: None,
-            offset: None,
-        }
-    }
-
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        if let SourceType::Database { limit: l, .. } = &mut self {
-            *l = Some(limit);
-        }
-        self
-    }
-
-    pub fn with_offset(mut self, offset: usize) -> Self {
-        if let SourceType::Database { offset: o, .. } = &mut self {
-            *o = Some(offset);
-        }
-        self
-    }
-
-    pub fn query(&self) -> Option<&str> {
-        match self {
-            SourceType::Database { query, .. } => Some(query),
-            _ => None,
-        }
-    }
-
-    pub fn limit(&self) -> Option<usize> {
-        match self {
-            SourceType::Database { limit, .. } => *limit,
-            _ => None,
-        }
-    }
-
-    pub fn offset(&self) -> Option<usize> {
-        match self {
-            SourceType::Database { offset, .. } => *offset,
-            _ => None,
-        }
-    }
 }
 
 impl fmt::Display for SourceType {
@@ -187,15 +137,4 @@ mod tests {
         assert!(SourceType::API.is_api());
     }
 
-    #[test]
-    fn test_database_builder() {
-        let source = SourceType::database("SELECT * FROM users".to_string())
-            .with_limit(100)
-            .with_offset(10);
-
-        assert_eq!(source.query(), Some("SELECT * FROM users"));
-        assert_eq!(source.limit(), Some(100));
-        assert_eq!(source.offset(), Some(10));
-        assert!(source.is_rdbms());
-    }
 }

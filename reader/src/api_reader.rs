@@ -1,18 +1,27 @@
-//! API Reader - HTTP API 数据源的 Job 实现
+//! API Reader - HTTP API 数据源的 Reader 实现
+//!
+//! `ApiReader` 持有 `ApiJob`，`ReaderJob` trait 实现在 Reader 上。
+//! `ApiJob` 负责业务逻辑（配置解析、RecordBuilder 构建），
+//! `ApiReader` 负责生命周期管理和 pipeline 对接。
 
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::info;
 
 use relus_common::pipeline::{PipelineMessage, RecordBuilder};
 use relus_common::types::SourceType;
 use relus_common::JobConfig;
 
 use crate::rdbms_reader_util::util;
-use relus_common::interface::{ReadTask, ReaderJob, SplitReaderResult};
+use relus_common::interface::{ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
 
-/// API Job 实现
+pub struct ApiReader {
+    job: ApiJob,
+}
+
+/// API 数据源的 Job 业务逻辑
 pub struct ApiJob {
     config: Arc<JobConfig>,
     builder: RecordBuilder,
@@ -28,8 +37,15 @@ impl ApiJob {
     }
 }
 
+impl ApiReader {
+    pub fn init(config: Arc<JobConfig>) -> Result<Self> {
+        let job = ApiJob::new(config);
+        Ok(Self { job })
+    }
+}
+
 #[async_trait::async_trait]
-impl ReaderJob for ApiJob {
+impl ReaderJob for ApiReader {
     async fn split(&self, _reader_threads: usize) -> Result<SplitReaderResult> {
         Ok(SplitReaderResult {
             total_records: 0,
@@ -42,28 +58,32 @@ impl ReaderJob for ApiJob {
             }],
         })
     }
+    fn description(&self) -> String {
+        format!("ApiReader (source: {})", self.job.config.input.name)
+    }
+}
 
-    async fn execute_task(
+#[async_trait::async_trait]
+impl ReaderTask for ApiReader {
+    async fn read_data(
         &self,
-        task: ReadTask,
-        tx: mpsc::Sender<PipelineMessage>,
+        task: &ReadTask,
+        tx: &mpsc::Sender<PipelineMessage>,
     ) -> Result<usize> {
-        println!("Reader-{} 获取 (API 数据源)", task.task_id);
-        let items = util::client_tool::fetch_from_api(&self.config).await?;
-        println!("Reader-{} 获取了 {} 条数据", task.task_id, items.len());
+        // to-do reader 应该在这里执行execute
+
+        info!("Reader-{} 获取 (API 数据源)", task.task_id);
+        let items = util::client_tool::fetch_from_api(&self.job.config).await?;
+        info!("Reader-{} 获取了 {} 条数据", task.task_id, items.len());
 
         let mut sent = 0;
         for chunk in items.chunks(100) {
-            let message = self.builder.build_message(chunk)?;
+            let message = self.job.builder.build_message(chunk)?;
             tx.send(message).await?;
             sent += chunk.len();
         }
 
-        println!("Reader-{} 完成，共发送 {} 条数据", task.task_id, sent);
+        info!("Reader-{} 完成，共发送 {} 条数据", task.task_id, sent);
         Ok(sent)
-    }
-
-    fn description(&self) -> String {
-        format!("ApiJob (source: {})", self.config.input.name)
     }
 }

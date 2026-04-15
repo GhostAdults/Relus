@@ -1,6 +1,8 @@
 //! RDBMS Reader 核心实现
 //!
-//! 提供关系型数据库读取功能，支持 PostgreSQL 和 MySQL
+//! `RdbmsReader` 持有 `RdbmsJob`，`ReaderJob` trait 实现在 Reader 上。
+//! `RdbmsJob` 负责业务逻辑（配置管理、schema discovery、数据读取），
+//! `RdbmsReader` 负责生命周期管理和 pipeline 对接。
 
 use crate::rdbms_reader_util::util::*;
 use anyhow::Result;
@@ -8,7 +10,6 @@ use futures::StreamExt;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::usize;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -37,17 +38,44 @@ pub struct RdbmsConfig {
     pub columns: String,
 }
 
-/// RDBMS Reader Job
+/// RDBMS Reader
+pub struct RdbmsReader {
+    job: RdbmsJob,
+}
+
+impl RdbmsReader {
+    pub fn new(config: Arc<JobConfig>, rdbms_config: RdbmsConfig) -> Result<Self> {
+        let job = RdbmsJob::new(config, rdbms_config);
+        Ok(Self { job })
+    }
+
+    pub fn from_job(job: RdbmsJob) -> Self {
+        Self { job }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReaderJob for RdbmsReader {
+    async fn split(&self, reader_threads: usize) -> Result<SplitReaderResult> {
+        let result = reader_split_util::do_split(&self.job, reader_threads).await;
+        Ok(result)
+    }
+    fn description(&self) -> String {
+        format!("RdbmsReader (table: {})", self.job.config.table)
+    }
+}
+
+/// RDBMS Reader Job 业务逻辑
 pub struct RdbmsJob {
     pub original_config: Arc<JobConfig>,
     pub config: RdbmsConfig,
     pub builder: RecordBuilder,
-    /// 发现的表结构（可选）
+    /// 发现的表结构
     pub table_schema: Option<TableSchema>,
 }
 
 impl RdbmsJob {
-    pub fn init(original_config: Arc<JobConfig>, config: RdbmsConfig) -> Self {
+    pub fn new(original_config: Arc<JobConfig>, config: RdbmsConfig) -> Self {
         let source_type = SourceType::from_str(&original_config.input.source_type);
         let builder =
             RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone())
@@ -80,69 +108,47 @@ impl RdbmsJob {
     pub fn schema(&self) -> Option<&TableSchema> {
         self.table_schema.as_ref()
     }
-
-    /// 发送批量数据到下游 Channel
-    /// 返回实际发送的数据行数
-    async fn send_batch(
-        &self,
-        rows: &[JsonValue],
-        tx: &mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize> {
-        let row_count = rows.len();
-        let message = self.builder.build_message(rows)?;
-
-        tx.send(message)
-            .await
-            .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
-        Ok(row_count)
-    }
 }
 
-/// Job
-#[async_trait::async_trait]
-impl ReaderJob for RdbmsJob {
-    async fn split(&self, reader_threads: usize) -> Result<SplitReaderResult> {
-        let result = reader_split_util::do_split(&self, reader_threads).await;
-        Ok(result)
-    }
+/// 发送批量数据到下游 Channel
+/// 返回实际发送的数据行数
+async fn send_batch(
+    job: &RdbmsJob,
+    rows: &[JsonValue],
+    tx: &mpsc::Sender<PipelineMessage>,
+) -> Result<usize> {
+    let row_count = rows.len();
+    let message = job.builder.build_message(rows)?;
 
-    async fn execute_task(
-        &self,
-        task: ReadTask,
-        tx: mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize> {
-        let sent: usize = self.read_data(&task, &tx).await?;
-        info!("Reader-{} 已发送 {} 条", task.task_id, sent);
-        Ok(sent)
-    }
-
-    fn description(&self) -> String {
-        format!("RdbmsJob (table: {})", self.config.table)
-    }
+    tx.send(message)
+        .await
+        .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
+    Ok(row_count)
 }
 
 /// Task
 #[async_trait::async_trait]
-impl ReaderTask for RdbmsJob {
+impl ReaderTask for RdbmsReader {
     async fn read_data(
         &self,
         slice_task: &ReadTask,
         tx: &mpsc::Sender<PipelineMessage>,
     ) -> Result<usize> {
-        let pool = get_pool_from_config(&self.original_config).await?;
+        let pool = get_pool_from_config(&self.job.original_config).await?;
 
         let sql = match &slice_task.query_sql {
             Some(query) => query.clone(),
             None => {
                 let query_str = self
+                    .job
                     .config
                     .query_sql
                     .as_ref()
                     .and_then(|v| v.first())
                     .map(|s| s.as_str());
                 build_query_sql(
-                    &self.config.columns,
-                    self.config.table.as_str(),
+                    &self.job.config.columns,
+                    self.job.config.table.as_str(),
                     query_str,
                     slice_task.limit,
                     slice_task.offset,
@@ -152,6 +158,7 @@ impl ReaderTask for RdbmsJob {
         let row_stream = execute_query_stream(pool.as_ref(), &sql)?;
 
         let batch_size = self
+            .job
             .original_config
             .batch_size
             .unwrap_or(DEFAULT_BATCH_SIZE);
@@ -165,15 +172,15 @@ impl ReaderTask for RdbmsJob {
             buffer.push(json_row);
 
             if buffer.len() >= batch_size {
-                sent += self.send_batch(&buffer, tx).await?;
+                sent += send_batch(&self.job, &buffer, tx).await?;
                 buffer.clear();
             }
         }
 
         if !buffer.is_empty() {
-            sent += self.send_batch(&buffer, tx).await?;
+            sent += send_batch(&self.job, &buffer, tx).await?;
         }
-
+        info!("Reader-{} 已发送 {} 条", slice_task.task_id, sent);
         Ok(sent)
     }
 }

@@ -26,3 +26,4 @@ num-traits = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+inventory = { workspace = true }
