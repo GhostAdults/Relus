@@ -15,7 +15,7 @@ use crate::rdbms_writer_util::rdbms_writer::{
     PipelineRowWriter, RdbmsConfig, RdbmsJob, RdbmsWriter,
 };
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use relus_common::interface::{SplitWriterResult, WriteMode, WriteTask, WriterJob, WriterTask};
+use crate::{SplitWriterResult, WriteMode, WriteTask, WriterJob, WriterTask};
 
 pub struct DatabaseWriter {
     job: DatabaseJob,

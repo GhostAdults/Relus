@@ -2,7 +2,7 @@ use crate::rdbms_reader_util::rdbms_reader::count_total_records;
 use crate::rdbms_reader_util::rdbms_reader::RdbmsJob;
 use anyhow::Result;
 use relus_common::constant::key::SPLIT_FACTOR;
-use relus_common::interface::{ReadTask, SplitReaderResult};
+use crate::{ReadTask, SplitReaderResult};
 use relus_connector_rdbms::pool::{ColumnValue, DbKind, RdbmsPool};
 use relus_connector_rdbms::util::{build_select_query_for, get_pool_from_config};
 use serde_json::Value as JsonValue;

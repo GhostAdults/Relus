@@ -11,7 +11,7 @@
 
 use relus_common::data_source_config::DataSourceConfig;
 use relus_common::job_config::JobConfig;
-use relus_common::pipeline::RecordBuilder;
+use relus_core::pipeline::RecordBuilder;
 use relus_common::types::{SourceType, TypeConverterRegistry};
 use relus_core::core::serve::sync;
 use serde_json::json;

@@ -5,6 +5,9 @@
 //! - 一个 Job 被 Reader split 为 N 个 ReadTask
 //! - Writer 以相同数量 N split，形成 N 个 1:1 Pair
 //! - 通过 TaskGroup + TaskExecutor 控制并发
+//!
+//! Core 层负责 stream 消费、buffer 切分、RecordBuilder mapping 和 channel 发送
+
 use anyhow::Result;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -12,8 +15,10 @@ use relus_common::constant::pipeline::{
     DEFAULT_BATCH_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_CHANNEL_NUMBER, DEFAULT_PER_GROUP_CHANNEL,
     DEFAULT_READER_THREADS,
 };
-use relus_common::interface::{ReadTask, Reader, WriteTask, Writer};
+use relus_reader::{ReadTask, Reader};
+use relus_writer::{WriteTask, Writer};
 use relus_common::pipeline::PipelineMessage;
+use relus_common::types::SourceType;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -22,6 +27,7 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
 
 use super::progress::create_progress_bars;
+use crate::pipeline::RecordBuilder;
 
 // ==========================================
 // 配置
@@ -142,10 +148,64 @@ pub async fn run_pipeline(
     config: PipelineConfig,
     reader: Box<dyn Reader>,
     writer: Box<dyn Writer>,
+    job_config: Arc<relus_common::JobConfig>,
 ) -> Result<PipelineStats> {
     let reader: Arc<dyn Reader> = Arc::from(reader);
     let writer: Arc<dyn Writer> = Arc::from(writer);
-    run_paired_pipeline(&config, reader, writer).await
+
+    // 从 JobConfig 构建 RecordBuilder
+    let source_type = SourceType::from_str(&job_config.input.source_type);
+    let record_builder = Arc::new(
+        RecordBuilder::new(
+            job_config.column_mapping.clone(),
+            job_config.column_types.clone(),
+        )
+        .with_source_type(source_type),
+    );
+
+    run_paired_pipeline(&config, reader, writer, record_builder).await
+}
+
+/// 从 Reader 获取 JsonStream，消费并通过 RecordBuilder mapping 后发送到 channel
+/// consume_stream_and_send
+async fn csas(
+    pair_id: usize,
+    reader: Arc<dyn Reader>,
+    task: &ReadTask,
+    batch_size: usize,
+    builder: &RecordBuilder,
+    tx: &mpsc::Sender<PipelineMessage>,
+) -> Result<usize> {
+    let stream = reader.read_data(task).await?;
+    let mut sent = 0;
+    let mut buffer = Vec::with_capacity(batch_size);
+
+    futures::pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let json_val = result?;
+        buffer.push(json_val);
+
+        if buffer.len() >= batch_size {
+            let message = builder.build_message(&buffer)?;
+            tx.send(message)
+                .await
+                .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
+            sent += buffer.len();
+            buffer.clear();
+        }
+    }
+
+    // 发送残余数据
+    if !buffer.is_empty() {
+        let message = builder.build_message(&buffer)?;
+        tx.send(message)
+            .await
+            .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
+        sent += buffer.len();
+    }
+
+    info!("Reader-{} 已发送 {} 条（core mapping）", pair_id, sent);
+    Ok(sent)
 }
 
 async fn run_task_pair(
@@ -155,26 +215,28 @@ async fn run_task_pair(
     read_task: ReadTask,
     write_task: WriteTask,
     buffer_size: usize,
+    batch_size: usize,
+    record_builder: Arc<RecordBuilder>,
     cancel: Arc<Notify>,
 ) -> PairResult {
     let (tx, rx) = mpsc::channel(buffer_size);
 
     let r = Arc::clone(&reader);
     let cancel_r = Arc::clone(&cancel);
+    let builder = Arc::clone(&record_builder);
     let r_handle = tokio::spawn(async move {
         tokio::select! {
-            result = r.read_data(&read_task, &tx) => {
-                match &result {
-                    Ok(_) => {
-                        let _ = tx.send(PipelineMessage::ReaderFinished).await;
-                    }
-                    Err(e) => {
+            result = csas(pair_id, r, &read_task, batch_size, &builder, &tx) => {
+                if result.is_ok() {
+                    let _ = tx.send(PipelineMessage::ReaderFinished).await;
+                } else {
+                    if let Err(ref e) = result {
                         error!("Reader-{} 失败: {}", pair_id, e);
                         let _ = tx.send(PipelineMessage::Error(e.to_string())).await;
-                        cancel_r.notify_waiters();
                     }
+                    cancel_r.notify_waiters();
                 }
-                result
+                result.map(|count| count)
             }
             () = cancel_r.notified() => {
                 warn!("Reader-{} 被终止（其他任务失败）", pair_id);
@@ -250,6 +312,8 @@ async fn run_task_group(
     reader: Arc<dyn Reader>,
     writer: Arc<dyn Writer>,
     buffer_size: usize,
+    batch_size: usize,
+    record_builder: Arc<RecordBuilder>,
     cancel: Arc<Notify>,
     reader_bar: indicatif::ProgressBar,
     writer_bar: indicatif::ProgressBar,
@@ -270,6 +334,8 @@ async fn run_task_group(
                 read_task,
                 write_task,
                 buffer_size,
+                batch_size,
+                Arc::clone(&record_builder),
                 Arc::clone(&cancel),
             ));
         } else {
@@ -308,6 +374,8 @@ async fn run_task_group(
                         read_task,
                         write_task,
                         buffer_size,
+                        batch_size,
+                        Arc::clone(&record_builder),
                         Arc::clone(&cancel),
                     ));
                 } else {
@@ -330,6 +398,7 @@ async fn run_paired_pipeline(
     config: &PipelineConfig,
     reader: Arc<dyn Reader>,
     writer: Arc<dyn Writer>,
+    record_builder: Arc<RecordBuilder>,
 ) -> Result<PipelineStats> {
     let start_time = Instant::now();
 
@@ -413,6 +482,8 @@ async fn run_paired_pipeline(
             Arc::clone(&reader),
             Arc::clone(&writer),
             config.buffer_size,
+            config.batch_size,
+            Arc::clone(&record_builder),
             Arc::clone(&cancel),
             reader_bar.clone(),
             writer_bar.clone(),

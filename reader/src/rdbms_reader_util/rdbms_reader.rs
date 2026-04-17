@@ -1,27 +1,22 @@
 //! RDBMS Reader 核心实现
 //!
 //! `RdbmsReader` 持有 `RdbmsJob`，`ReaderJob` trait 实现在 Reader 上。
-//! `RdbmsJob` 负责业务逻辑（配置管理、schema discovery、数据读取），
-//! `RdbmsReader` 负责生命周期管理和 pipeline 对接。
+//! `RdbmsJob` 负责业务逻辑（配置管理、schema discovery），
+//! `RdbmsReader` 负责生命周期管理和数据读取（返回 JsonStream）。
 
 use crate::rdbms_reader_util::util::*;
 use anyhow::Result;
-use futures::StreamExt;
-use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::info;
-
-use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use relus_common::interface::{ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
-use relus_common::pipeline::RecordBuilder;
-use relus_common::types::SourceType;
+use futures::{stream, StreamExt};
+use crate::{JsonStream, ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
 use relus_common::JobConfig;
-use relus_common::PipelineMessage;
 use relus_connector_rdbms::pool::RdbmsPool;
 use relus_connector_rdbms::schema::{MetadataDiscoverer, RdbmsDiscoverer, TableSchema};
 use relus_connector_rdbms::util::{build_query_sql, get_pool_from_config};
+use serde_json::Value as JsonValue;
+use sqlx::{Column, Row};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use tracing::info;
 
 /// RDBMS 读取配置
 #[derive(Debug, Clone)]
@@ -69,22 +64,14 @@ impl ReaderJob for RdbmsReader {
 pub struct RdbmsJob {
     pub original_config: Arc<JobConfig>,
     pub config: RdbmsConfig,
-    pub builder: RecordBuilder,
-    /// 发现的表结构
     pub table_schema: Option<TableSchema>,
 }
 
 impl RdbmsJob {
     pub fn new(original_config: Arc<JobConfig>, config: RdbmsConfig) -> Self {
-        let source_type = SourceType::from_str(&original_config.input.source_type);
-        let builder =
-            RecordBuilder::new(config.column_mapping.clone(), config.column_types.clone())
-                .with_source_type(source_type);
-
         Self {
             original_config,
             config,
-            builder,
             table_schema: None,
         }
     }
@@ -110,30 +97,13 @@ impl RdbmsJob {
     }
 }
 
-/// 发送批量数据到下游 Channel
-/// 返回实际发送的数据行数
-async fn send_batch(
-    job: &RdbmsJob,
-    rows: &[JsonValue],
-    tx: &mpsc::Sender<PipelineMessage>,
-) -> Result<usize> {
-    let row_count = rows.len();
-    let message = job.builder.build_message(rows)?;
-
-    tx.send(message)
-        .await
-        .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
-    Ok(row_count)
-}
-
-/// Task
+/// Task: 执行查询并返回原始数据流
+///
+/// 每个 task 在 split 阶段已被切分为 offset/limit 分片，
+/// 在 async 上下文中 collect 行后包装为 `'static` JsonStream。
 #[async_trait::async_trait]
 impl ReaderTask for RdbmsReader {
-    async fn read_data(
-        &self,
-        slice_task: &ReadTask,
-        tx: &mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize> {
+    async fn read_data(&self, slice_task: &ReadTask) -> Result<JsonStream> {
         let pool = get_pool_from_config(&self.job.original_config).await?;
 
         let sql = match &slice_task.query_sql {
@@ -155,67 +125,67 @@ impl ReaderTask for RdbmsReader {
                 )
             }
         };
-        let row_stream = execute_query_stream(pool.as_ref(), &sql)?;
 
-        let batch_size = self
-            .job
-            .original_config
-            .batch_size
-            .unwrap_or(DEFAULT_BATCH_SIZE);
-        let mut sent = 0;
-        let mut buffer = Vec::with_capacity(batch_size);
+        let rows = collect_query_rows(&pool, &sql).await?;
+        info!("Reader-{} 查询到 {} 条数据", slice_task.task_id, rows.len());
 
-        let mut stream = row_stream.into_inner();
-
-        while let Some(row_result) = stream.next().await {
-            let json_row = row_result?;
-            buffer.push(json_row);
-
-            if buffer.len() >= batch_size {
-                sent += send_batch(&self.job, &buffer, tx).await?;
-                buffer.clear();
-            }
-        }
-
-        if !buffer.is_empty() {
-            sent += send_batch(&self.job, &buffer, tx).await?;
-        }
-        info!("Reader-{} 已发送 {} 条", slice_task.task_id, sent);
-        Ok(sent)
+        Ok(Box::pin(stream::iter(rows.into_iter().map(Ok))))
     }
 }
 
-// ============================================
-// 数据库流式查询
-// ============================================
+/// 从连接池执行查询并收集所有行为 JsonValue
+async fn collect_query_rows(pool: &RdbmsPool, sql: &str) -> Result<Vec<JsonValue>> {
+    match pool {
+        RdbmsPool::Postgres(pg_pool) => {
+            let mut rows = Vec::new();
+            let mut stream = sqlx::query(sql).fetch(pg_pool);
+            while let Some(result) = stream.next().await {
+                let row: sqlx::postgres::PgRow = result?;
+                let mut obj = serde_json::Map::new();
+                for (idx, col) in row.columns().iter().enumerate() {
+                    let val: Option<String> = row.try_get(idx).ok();
+                    obj.insert(
+                        col.name().to_string(),
+                        val.map(JsonValue::String).unwrap_or(JsonValue::Null),
+                    );
+                }
+                rows.push(JsonValue::Object(obj));
+            }
+            Ok(rows)
+        }
+        RdbmsPool::Mysql(my_pool) => {
+            let mut rows = Vec::new();
+            let mut stream = sqlx::query(sql).fetch(my_pool);
+            while let Some(result) = stream.next().await {
+                let row: sqlx::mysql::MySqlRow = result?;
+                let mut obj = serde_json::Map::new();
+                for (idx, col) in row.columns().iter().enumerate() {
+                    let val: Option<String> = row.try_get(idx).ok();
+                    obj.insert(
+                        col.name().to_string(),
+                        val.map(JsonValue::String).unwrap_or(JsonValue::Null),
+                    );
+                }
+                rows.push(JsonValue::Object(obj));
+            }
+            Ok(rows)
+        }
+    }
+}
 
-type JsonStream<'a> =
+type JsonStreamInternal<'a> =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<JsonValue, sqlx::Error>> + Send + 'a>>;
 
-/// 数据库行流
-pub struct DbRowStream<'a> {
-    stream: JsonStream<'a>,
-}
-
-impl<'a> DbRowStream<'a> {
-    pub fn into_inner(self) -> JsonStream<'a> {
-        self.stream
-    }
-}
-
-/// 执行流式查询
+/// 执行流式查询（借用 供 split 阶段 count 等场景使用）
 pub fn execute_query_stream<'a>(pool: &'a RdbmsPool, sql: &'a str) -> Result<DbRowStream<'a>> {
-    use sqlx::{Column, Row};
-
-    let stream: JsonStream<'a> = match pool {
+    let stream: JsonStreamInternal<'a> = match pool {
         RdbmsPool::Postgres(pg_pool) => Box::pin(sqlx::query(sql).fetch(pg_pool).map(|result| {
             result.map(|row: sqlx::postgres::PgRow| {
                 let mut obj = serde_json::Map::new();
                 for (idx, col) in row.columns().iter().enumerate() {
-                    let col_name = col.name();
                     let val: Option<String> = row.try_get(idx).ok();
                     obj.insert(
-                        col_name.to_string(),
+                        col.name().to_string(),
                         val.map(JsonValue::String).unwrap_or(JsonValue::Null),
                     );
                 }
@@ -226,10 +196,9 @@ pub fn execute_query_stream<'a>(pool: &'a RdbmsPool, sql: &'a str) -> Result<DbR
             result.map(|row: sqlx::mysql::MySqlRow| {
                 let mut obj = serde_json::Map::new();
                 for (idx, col) in row.columns().iter().enumerate() {
-                    let col_name = col.name();
                     let val: Option<String> = row.try_get(idx).ok();
                     obj.insert(
-                        col_name.to_string(),
+                        col.name().to_string(),
                         val.map(JsonValue::String).unwrap_or(JsonValue::Null),
                     );
                 }
@@ -241,7 +210,22 @@ pub fn execute_query_stream<'a>(pool: &'a RdbmsPool, sql: &'a str) -> Result<DbR
     Ok(DbRowStream { stream })
 }
 
-// 获取当前表数据count
+/// 数据库行流（借用）
+pub struct DbRowStream<'a> {
+    stream:
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<JsonValue, sqlx::Error>> + Send + 'a>>,
+}
+
+impl<'a> DbRowStream<'a> {
+    pub fn into_inner(
+        self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<JsonValue, sqlx::Error>> + Send + 'a>>
+    {
+        self.stream
+    }
+}
+
+/// 获取当前表数据 count
 pub async fn count_total_records(
     pool: &RdbmsPool,
     table: &str,

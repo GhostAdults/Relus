@@ -1,4 +1,6 @@
 pub mod core;
+pub mod dsl_engine;
+pub mod pipeline;
 
 // 确保 inventory::submit! 被 core 链接
 use relus_reader as _;

@@ -3,19 +3,148 @@ pub mod rdbms_writer_util;
 
 pub use database_writer::{DatabaseJob, DatabaseWriter};
 pub use rdbms_writer_util::rdbms_writer::{RdbmsConfig, RdbmsJob, RdbmsWriter, RowWriter};
-use relus_common::SourceType;
-pub use relus_common::{interface, pipeline};
 
-/// 注册本 crate 提供的所有 Writer 类型
-pub fn register(registry: &interface::GlobalRegistry) {
-    registry.register_writer(SourceType::Database.as_str(), |config| {
-        let writer = DatabaseWriter::init(config)?;
-        Ok(Box::new(writer))
-    });
+use anyhow::Result;
+use relus_common::job_config::JobConfig;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
+use tokio::sync::mpsc;
+
+// ==========================================
+// Writer trait 定义
+// ==========================================
+
+/// 一个 writer job 分裂成多个 writer task
+#[derive(Debug, Clone)]
+pub struct WriteTask {
+    pub task_id: usize,
+    pub config: Arc<JobConfig>,
+    pub mode: WriteMode,
+    pub use_transaction: bool,
+    pub batch_size: usize,
 }
 
+/// Job 切分结果
+pub struct SplitWriterResult {
+    pub tasks: Vec<WriteTask>,
+}
+
+/// 写入模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Insert,
+    Upsert,
+}
+
+impl WriteMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "upsert" => WriteMode::Upsert,
+            _ => WriteMode::Insert,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WriteMode::Insert => "insert",
+            WriteMode::Upsert => "upsert",
+        }
+    }
+}
+
+/// Writer Job trait
+#[async_trait::async_trait]
+pub trait WriterJob: Send + Sync {
+    async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult>;
+    fn description(&self) -> String;
+}
+
+/// Writer Task trait
+#[async_trait::async_trait]
+pub trait WriterTask: Send + Sync {
+    async fn write_data(
+        &self,
+        task: WriteTask,
+        rx: mpsc::Receiver<relus_common::PipelineMessage>,
+    ) -> Result<usize>;
+}
+
+/// Writer = WriterJob + WriterTask
+#[async_trait::async_trait]
+pub trait Writer: WriterJob + WriterTask {}
+
+#[async_trait::async_trait]
+impl<T: WriterJob + WriterTask> Writer for T {}
+
+// ==========================================
+// Writer 全局注册表
+// ==========================================
+
+type WriterCreator = fn(Arc<JobConfig>) -> Result<Box<dyn Writer>>;
+
+/// Writer 插件
+pub struct WriterPlugin {
+    pub source_type: &'static str,
+    pub create: WriterCreator,
+}
+
+inventory::collect!(WriterPlugin);
+
+/// Writer 全局注册表
+pub struct WriterRegistry {
+    creators: RwLock<HashMap<String, WriterCreator>>,
+}
+
+impl WriterRegistry {
+    pub fn instance() -> &'static Self {
+        static INSTANCE: OnceLock<WriterRegistry> = OnceLock::new();
+        INSTANCE.get_or_init(|| WriterRegistry {
+            creators: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn collect_and_register() {
+        let registry = Self::instance();
+        for plugin in inventory::iter::<WriterPlugin> {
+            registry
+                .creators
+                .write()
+                .unwrap()
+                .insert(plugin.source_type.to_string(), plugin.create);
+        }
+    }
+
+    pub fn prepare_writer(
+        &self,
+        source_type: &str,
+        config: Arc<JobConfig>,
+    ) -> Result<Box<dyn Writer>> {
+        let creators = self.creators.read().unwrap();
+        let creator = creators.get(source_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "未找到 Writer 类型: '{}'. 已注册: {:?}",
+                source_type,
+                creators.keys().collect::<Vec<_>>()
+            )
+        })?;
+        creator(config)
+    }
+
+    pub fn list_writers(&self) -> Vec<String> {
+        self.creators.read().unwrap().keys().cloned().collect()
+    }
+}
+
+// ==========================================
+// 注册本 crate 的 Writer 实现
+// ==========================================
+
 inventory::submit! {
-    relus_common::interface::registry::WriterPlugin {
-        register: register,
+    WriterPlugin {
+        source_type: "database",
+        create: |config| {
+            let writer = DatabaseWriter::init(config)?;
+            Ok(Box::new(writer))
+        },
     }
 }

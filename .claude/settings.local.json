@@ -9,7 +9,13 @@
       "mcp__db-mcp-server__query_mysql1",
       "mcp__db-mcp-server__schema_mysql1",
       "mcp__db-mcp-server__execute_mysql1",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "Bash(openspec new:*)",
+      "Bash(openspec instructions:*)",
+      "Bash(openspec list:*)",
+      "Bash(openspec status:*)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({'total':d['progress']['total'],'complete':d['progress']['complete'],'tasks':[t for t in d['tasks'] if not t['done']]},indent=2\\)\\)\")",
+      "Bash(openspec archive:*)"
     ]
   }
 }

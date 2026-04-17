@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::dsl_engine::SyncEngine;
-use crate::types::{
+use relus_common::types::{
     MappingRow, MappingSchema, OriginalTypeInfo, SourceType, TypeConverterRegistry,
 };
 
@@ -340,7 +340,7 @@ mod tests {
 
         let record = builder.build(&item).unwrap();
         match record.get_value("name").unwrap() {
-            crate::types::UnifiedValue::String(s) => assert_eq!(s, "ALICE"),
+            relus_common::types::UnifiedValue::String(s) => assert_eq!(s, "ALICE"),
             other => panic!("expected String, got {:?}", other),
         }
     }
@@ -360,13 +360,13 @@ mod tests {
 
         let adult = builder.build(&json!({"age": 25})).unwrap();
         match adult.get_value("is_adult").unwrap() {
-            crate::types::UnifiedValue::Int(n) => assert_eq!(*n, 1),
+            relus_common::types::UnifiedValue::Int(n) => assert_eq!(*n, 1),
             other => panic!("expected Int(1), got {:?}", other),
         }
 
         let child = builder.build(&json!({"age": 12})).unwrap();
         match child.get_value("is_adult").unwrap() {
-            crate::types::UnifiedValue::Int(n) => assert_eq!(*n, 0),
+            relus_common::types::UnifiedValue::Int(n) => assert_eq!(*n, 0),
             other => panic!("expected Int(0), got {:?}", other),
         }
     }
@@ -381,7 +381,7 @@ mod tests {
         let record = builder.build(&json!({"id": 42})).unwrap();
 
         match record.get_value("tag").unwrap() {
-            crate::types::UnifiedValue::String(s) => assert_eq!(s, "IMPORTED"),
+            relus_common::types::UnifiedValue::String(s) => assert_eq!(s, "IMPORTED"),
             other => panic!("expected String, got {:?}", other),
         }
     }
@@ -396,7 +396,7 @@ mod tests {
 
         let record = builder.build(&json!({"name": "test"})).unwrap();
         match record.get_value("name").unwrap() {
-            crate::types::UnifiedValue::String(s) => assert_eq!(s, "test"),
+            relus_common::types::UnifiedValue::String(s) => assert_eq!(s, "test"),
             other => panic!("expected String, got {:?}", other),
         }
     }

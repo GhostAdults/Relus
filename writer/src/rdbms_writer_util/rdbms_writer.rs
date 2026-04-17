@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::rdbms_writer_util::util::writer_split_util;
-use relus_common::interface::{SplitWriterResult, WriteMode, WriteTask, WriterJob, WriterTask};
+use crate::{SplitWriterResult, WriteMode, WriteTask, WriterJob, WriterTask};
 
 /// RDBMS 写入配置
 #[derive(Debug, Clone)]

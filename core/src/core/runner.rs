@@ -11,14 +11,16 @@ use relus_common::constant::pipeline::{
     DEFAULT_BATCH_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_CHANNEL_NUMBER, DEFAULT_PER_GROUP_CHANNEL,
     DEFAULT_READER_THREADS,
 };
-use relus_common::interface::{Reader, Writer};
 use relus_common::job_config::JobConfig;
+use relus_reader::Reader;
+use relus_writer::Writer;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::container::{run_pipeline, PipelineConfig, PipelineStats};
-use super::registry::GlobalRegistry;
+use relus_reader::ReaderRegistry;
+use relus_writer::WriterRegistry;
 
 // ==========================================
 // 配置类型
@@ -142,10 +144,15 @@ impl Runner {
     }
 
     /// 执行同步任务
-    pub async fn run(&self, reader: Box<dyn Reader>, writer: Box<dyn Writer>) -> Result<RunResult> {
+    pub async fn run(
+        &self,
+        reader: Box<dyn Reader>,
+        writer: Box<dyn Writer>,
+        job_config: Arc<JobConfig>,
+    ) -> Result<RunResult> {
         let start_time = Instant::now();
         let pipeline_config = self.config.to_pipeline_config();
-        let pipeline_stats = run_pipeline(pipeline_config, reader, writer).await?;
+        let pipeline_stats = run_pipeline(pipeline_config, reader, writer, job_config).await?;
         let elapsed = start_time.elapsed();
         let mut stats = RunnerStats::from_pipeline(pipeline_stats);
         stats.elapsed_secs = elapsed.as_secs_f64();
@@ -168,17 +175,18 @@ impl Runner {
 
 /// 根据配置动态创建 Reader/Writer 并执行同步
 ///
-/// 通过 GlobalRegistry 根据 source_type 动态创建对应的数据源实例，
+/// 通过 ReaderRegistry / WriterRegistry 根据 source_type 动态创建对应的数据源实例，
 /// 支持任意已注册的 Reader/Writer 组合。
 pub async fn run_sync(config: Arc<JobConfig>) -> Result<RunResult> {
     super::registry::ensure_initialized();
-    let registry = GlobalRegistry::instance();
 
-    // 动态创建 Reader 和 Writer
-    let reader = registry.prepare_reader(&config.input.source_type, Arc::clone(&config))?;
-    let writer = registry.prepare_writer(&config.output.source_type, Arc::clone(&config))?;
+    let reader_registry = ReaderRegistry::instance();
+    let writer_registry = WriterRegistry::instance();
+
+    let reader = reader_registry.prepare_reader(&config.input.source_type, Arc::clone(&config))?;
+    let writer = writer_registry.prepare_writer(&config.output.source_type, Arc::clone(&config))?;
 
     // 执行同步
     let runner = Runner::from_config(&config);
-    runner.run(reader, writer).await
+    runner.run(reader, writer, config).await
 }

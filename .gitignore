@@ -63,4 +63,5 @@ my_app/macos/app/release
 
 # ai agent tools
 .claude
+openspec/
 ###

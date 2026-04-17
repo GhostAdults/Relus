@@ -2,18 +2,15 @@
 //!
 //! `DatabaseReader` 持有 `DatabaseJob`，`ReaderJob` trait 实现在 Reader 上。
 //! `DatabaseJob` 负责业务逻辑（配置构建、schema discovery），
-//! `DatabaseReader` 负责生命周期管理和 pipeline 对接。
+//! `DatabaseReader` 负责生命周期管理和数据读取。
 
 use anyhow::Result;
-use relus_common::interface::ReaderTask;
-use relus_common::interface::{ReadTask, ReaderJob, SplitReaderResult};
+use crate::{JsonStream, ReadTask, ReaderJob, ReaderTask, SplitReaderResult};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::rdbms_reader_util::rdbms_reader::{RdbmsConfig, RdbmsJob, RdbmsReader};
 use relus_common::JobConfig;
-use relus_common::PipelineMessage;
 use relus_connector_rdbms::schema::SchemaDiscoveryConfig;
 
 pub struct DatabaseReader {
@@ -92,21 +89,18 @@ impl DatabaseJob {
 #[async_trait::async_trait]
 impl ReaderJob for DatabaseReader {
     async fn split(&self, reader_threads: usize) -> Result<SplitReaderResult> {
-        let rdbms_job = self.job.discover().await?;
-        rdbms_job.split(reader_threads).await
+        let rdbms_reader: RdbmsReader = self.job.discover().await?;
+        rdbms_reader.split(reader_threads).await
     }
     fn description(&self) -> String {
         format!("{}", self.job.original_config.input.name)
     }
 }
+
 #[async_trait::async_trait]
 impl ReaderTask for DatabaseReader {
-    async fn read_data(
-        &self,
-        task: &ReadTask,
-        tx: &mpsc::Sender<PipelineMessage>,
-    ) -> Result<usize> {
-        let rdbms_job = self.job.discover().await?;
-        rdbms_job.read_data(task, tx).await
+    async fn read_data(&self, task: &ReadTask) -> Result<JsonStream> {
+        let rdbms_reader: RdbmsReader = self.job.discover().await?;
+        rdbms_reader.read_data(task).await
     }
 }
