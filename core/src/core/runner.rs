@@ -3,6 +3,7 @@
 //! 职责：调起数据同步任务
 //! - 解析配置
 //! - 通过 Registry 动态创建 Reader/Writer
+//! - 根据 StreamMode 选择 BatchRunner 或 CdcRunner 策略
 //! - 委托给 Pipeline 执行
 //! - 返回结果
 
@@ -12,11 +13,13 @@ use relus_common::constant::pipeline::{
     DEFAULT_READER_THREADS,
 };
 use relus_common::job_config::JobConfig;
-use relus_reader::DataReader;
+use relus_reader::{DataReader, StreamMode};
 use relus_writer::DataWriter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
 use super::container::{run_pipeline, PipelineConfig, PipelineStats};
 use relus_reader::ReaderRegistry;
@@ -126,43 +129,57 @@ impl RunnerStats {
 }
 
 // ==========================================
-// Runner 启动器
+// TaskRunner trait
 // ==========================================
 
-/// Runner
-pub struct Runner {
+/// Runner 策略 trait — Batch 和 Cdc 的生命周期编排接口
+#[async_trait::async_trait]
+pub trait TaskRunner: Send + Sync {
+    async fn run(
+        &self,
+        reader: Arc<dyn DataReader>,
+        writer: Arc<dyn DataWriter>,
+        job_config: Arc<JobConfig>,
+    ) -> Result<RunResult>;
+}
+
+// ==========================================
+// BatchRunner
+// ==========================================
+
+/// Batch 策略：Reader stream 自然读到 None(EndOfInput)，进程自动退出
+struct BatchRunner {
     config: RunnerConfig,
 }
 
-impl Runner {
-    pub fn new(config: RunnerConfig) -> Self {
+impl BatchRunner {
+    fn new(config: RunnerConfig) -> Self {
         Self { config }
     }
+}
 
-    pub fn from_config(job_config: &JobConfig) -> Self {
-        let config = RunnerConfig::from_job_config(job_config);
-        Self::new(config)
-    }
-
-    /// 执行同步任务
-    pub async fn run(
+#[async_trait::async_trait]
+impl TaskRunner for BatchRunner {
+    async fn run(
         &self,
-        reader: Box<dyn DataReader>,
-        writer: Box<dyn DataWriter>,
+        reader: Arc<dyn DataReader>,
+        writer: Arc<dyn DataWriter>,
         job_config: Arc<JobConfig>,
     ) -> Result<RunResult> {
         let start_time = Instant::now();
         let pipeline_config = self.config.to_pipeline_config();
-        let pipeline_stats = run_pipeline(pipeline_config, reader, writer, job_config).await?;
-        let is_shutdown = pipeline_stats.shutdown;
+
+        // Batch: token 永不 cancel，Reader stream 会自然读到 EndOfInput
+        let cancel_token = CancellationToken::new();
+        let pipeline_stats =
+            run_pipeline(pipeline_config, reader, writer, job_config, cancel_token).await?;
+
         let elapsed = start_time.elapsed();
         let mut stats = RunnerStats::from_pipeline(pipeline_stats);
         stats.elapsed_secs = elapsed.as_secs_f64();
         stats.calculate_throughput();
 
-        let status = if is_shutdown {
-            RunStatus::Shutdown
-        } else if stats.records_failed > 0 {
+        let status = if stats.records_failed > 0 {
             RunStatus::Partial
         } else {
             RunStatus::Success
@@ -177,20 +194,134 @@ impl Runner {
     }
 }
 
+// ==========================================
+// CdcRunner
+// ==========================================
+
+/// Cdc 策略：Reader stream 永远不会 None，进程常驻等待新事件
+/// 收到 ctrl+c 后 cancel token -> reader.shutdown() -> stream 被迫 None -> 级联退出
+struct CdcRunner {
+    config: RunnerConfig,
+}
+
+impl CdcRunner {
+    fn new(config: RunnerConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskRunner for CdcRunner {
+    async fn run(
+        &self,
+        reader: Arc<dyn DataReader>,
+        writer: Arc<dyn DataWriter>,
+        job_config: Arc<JobConfig>,
+    ) -> Result<RunResult> {
+        let start_time = Instant::now();
+        let pipeline_config = self.config.to_pipeline_config();
+
+        let cancel_token = CancellationToken::new();
+        let pipeline_token = cancel_token.clone();
+
+        let pipeline_future = run_pipeline(pipeline_config, reader, writer, job_config, pipeline_token);
+        let ctrlc = tokio::signal::ctrl_c();
+
+        tokio::pin!(pipeline_future);
+        tokio::pin!(ctrlc);
+
+        tokio::select! {
+            _ = &mut ctrlc => {
+                info!("[CdcRunner] 收到停止信号，开始关闭");
+                cancel_token.cancel();
+                let result = (&mut pipeline_future).await?;
+
+                let elapsed = start_time.elapsed();
+                let mut stats = RunnerStats::from_pipeline(result);
+                stats.elapsed_secs = elapsed.as_secs_f64();
+                stats.calculate_throughput();
+                println!("[CdcRunner] Process stopped.");
+                Ok(RunResult {
+                    stats,
+                    status: RunStatus::Shutdown,
+                    duration: elapsed,
+                    error: None,
+                })
+            }
+            result = &mut pipeline_future => {
+                let pipeline_result = result?;
+
+                let elapsed = start_time.elapsed();
+                let mut stats = RunnerStats::from_pipeline(pipeline_result);
+                stats.elapsed_secs = elapsed.as_secs_f64();
+                stats.calculate_throughput();
+
+                let status = if stats.records_failed > 0 {
+                    RunStatus::Partial
+                } else {
+                    RunStatus::Failed
+                };
+
+                warn!("[CdcRunner] Pipeline 非预期退出");
+                Ok(RunResult {
+                    stats,
+                    status,
+                    duration: elapsed,
+                    error: Some("CDC pipeline 非预期退出".to_string()),
+                })
+            }
+        }
+    }
+}
+
+// ==========================================
+// 分发入口
+// ==========================================
+
+/// 根据 StreamMode 选择对应的 TaskRunner 策略执行同步
+async fn dispatch_runner(
+    stream_mode: StreamMode,
+    config: RunnerConfig,
+    reader: Arc<dyn DataReader>,
+    writer: Arc<dyn DataWriter>,
+    job_config: Arc<JobConfig>,
+) -> Result<RunResult> {
+    let runner: Box<dyn TaskRunner> = match stream_mode {
+        StreamMode::Finite => Box::new(BatchRunner::new(config)),
+        StreamMode::Infinite => Box::new(CdcRunner::new(config)),
+    };
+    runner.run(reader, writer, job_config).await
+}
+
 /// 根据配置动态创建 Reader/Writer 并执行同步
 ///
 /// 通过 ReaderRegistry / WriterRegistry 根据 source_type 动态创建对应的数据源实例，
-/// 支持任意已注册的 Reader/Writer 组合。
+/// 然后根据 Reader 返回的 StreamMode 选择 BatchRunner 或 CdcRunner。
 pub async fn run_sync(config: Arc<JobConfig>) -> Result<RunResult> {
     super::registry::ensure_initialized();
 
     let reader_registry = ReaderRegistry::instance();
     let writer_registry = WriterRegistry::instance();
 
-    let reader = reader_registry.prepare_reader(&config.source.source_type, Arc::clone(&config))?;
-    let writer = writer_registry.prepare_writer(&config.target.source_type, Arc::clone(&config))?;
+    let reader: Arc<dyn DataReader> =
+        Arc::from(reader_registry.prepare_reader(&config.source.source_type, Arc::clone(&config))?);
+    let writer: Arc<dyn DataWriter> =
+        Arc::from(writer_registry.prepare_writer(&config.target.source_type, Arc::clone(&config))?);
 
-    // 执行同步
-    let runner = Runner::from_config(&config);
-    runner.run(reader, writer, config).await
+    // 先 split 获取 StreamMode，用于选择策略
+    let runner_config = RunnerConfig::from_job_config(&config);
+    let split_result = reader.split(runner_config.reader_threads).await?;
+    let stream_mode = split_result.stream_mode;
+
+    info!(
+        "[run_sync] {} 模式, {} 个任务, 总记录数 {}",
+        match stream_mode {
+            StreamMode::Finite => "Batch",
+            StreamMode::Infinite => "Cdc",
+        },
+        split_result.tasks.len(),
+        split_result.total_records
+    );
+
+    dispatch_runner(stream_mode, runner_config, reader, writer, config).await
 }

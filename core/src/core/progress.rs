@@ -45,18 +45,19 @@ pub fn create_progress_bars(total_records: usize) -> ProgressContext {
 
         (rb, spacer, wb)
     } else {
+        let spinner_sty =
+            ProgressStyle::with_template("{spinner} {prefix}: {pos} events").unwrap();
+
         let rb = multi.add(ProgressBar::new_spinner());
-        rb.set_style(spinner_style());
+        rb.set_style(spinner_sty.clone());
         rb.set_prefix("Reader");
-        rb.set_message("reading");
 
         let spacer = multi.insert_after(&rb, ProgressBar::new(0));
         spacer.set_style(ProgressStyle::with_template(" ").unwrap());
 
         let wb = multi.insert_after(&spacer, ProgressBar::new_spinner());
-        wb.set_style(spinner_style());
+        wb.set_style(spinner_sty);
         wb.set_prefix("Writer");
-        wb.set_message("writing");
 
         (rb, spacer, wb)
     };
@@ -72,12 +73,22 @@ pub fn create_progress_bars(total_records: usize) -> ProgressContext {
 
 impl ProgressContext {
     pub fn finish(&self) {
-        self.reader_bar.finish_with_message("Done.");
-        self.writer_bar.finish_with_message("Done.");
+        if self.total_records > 0 {
+            self.reader_bar.finish_with_message("Done.");
+            self.writer_bar.finish_with_message("Done.");
+        } else {
+            self.reader_bar.finish_with_message(format!(
+                "Reader: {} events",
+                self.reader_bar.position()
+            ));
+            self.writer_bar.finish_with_message(format!(
+                "Writer: {} events",
+                self.writer_bar.position()
+            ));
+        }
         self.spacer
             .finish_with_message("-------------------------------------------------------------");
 
-        // summary
         self.multi.println("All tasks completed!").unwrap();
     }
 }

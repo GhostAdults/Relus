@@ -8,8 +8,6 @@
 //!
 //! Core 层负责 stream 消费、buffer 切分、RecordBuilder mapping 和 channel 发送
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use anyhow::Result;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -19,13 +17,14 @@ use relus_common::constant::pipeline::{
 };
 use relus_common::pipeline::PipelineMessage;
 use relus_common::types::SourceType;
-use relus_reader::{ReadTask, DataReader, StreamMode};
-use relus_writer::{WriteTask, DataWriter};
+use relus_reader::{DataReader, ReadTask};
+use relus_writer::{DataWriter, WriteTask};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::progress::create_progress_bars;
@@ -151,13 +150,11 @@ impl PipelineStats {
 /// 执行管道：Reader → Writer 1:1
 pub async fn run_pipeline(
     config: PipelineConfig,
-    reader: Box<dyn DataReader>,
-    writer: Box<dyn DataWriter>,
+    reader: Arc<dyn DataReader>,
+    writer: Arc<dyn DataWriter>,
     job_config: Arc<relus_common::JobConfig>,
+    cancel_token: CancellationToken,
 ) -> Result<PipelineStats> {
-    let reader: Arc<dyn DataReader> = Arc::from(reader);
-    let writer: Arc<dyn DataWriter> = Arc::from(writer);
-
     // 从 JobConfig 构建 RecordBuilder
     let source_type = SourceType::from_str(&job_config.source.source_type);
     let record_builder = Arc::new(
@@ -168,7 +165,7 @@ pub async fn run_pipeline(
         .with_source_type(source_type),
     );
 
-    run_paired_pipeline(&config, reader, writer, record_builder).await
+    run_paired_pipeline(&config, reader, writer, record_builder, cancel_token).await
 }
 
 /// 从 Reader 获取 JsonStream，消费并通过 RecordBuilder mapping 后发送到 channel
@@ -222,123 +219,82 @@ async fn run_task_pair(
     buffer_size: usize,
     batch_size: usize,
     record_builder: Arc<RecordBuilder>,
-    cancel: Arc<Notify>,
-    stream_mode: StreamMode,
+    cancel_token: CancellationToken,
 ) -> PairResult {
     let (tx, rx) = mpsc::channel(buffer_size);
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let was_cancelled = cancel_token.is_cancelled();
 
     let r = Arc::clone(&reader);
-    let cancel_r = Arc::clone(&cancel);
     let builder = Arc::clone(&record_builder);
-    let shutdown_r = Arc::clone(&shutdown_flag);
+    let reader_cancel = cancel_token.clone();
     let r_handle = tokio::spawn(async move {
         tokio::select! {
             result = csas(pair_id, r, &read_task, batch_size, &builder, &tx) => {
-                match stream_mode {
-                    StreamMode::Finite => {
-                        if result.is_ok() {
-                            let _ = tx.send(PipelineMessage::ReaderFinished).await;
-                        } else if let Err(ref e) = result {
-                            error!("Reader-{} 失败: {}", pair_id, e);
-                            let _ = tx.send(PipelineMessage::Error(e.to_string())).await;
-                            cancel_r.notify_waiters();
-                        }
+                match result {
+                    Ok(count) => {
+                        let _ = tx.send(PipelineMessage::ReaderFinished).await;
+                        Ok(count)
                     }
-                    StreamMode::Infinite => {
-                        if let Err(ref e) = result {
-                            error!("Reader-{} 流错误: {}", pair_id, e);
-                            let _ = tx.send(PipelineMessage::Error(e.to_string())).await;
-                            cancel_r.notify_waiters();
-                        }
+                    Err(e) => {
+                        error!("Reader-{} 失败: {}", pair_id, e);
+                        let _ = tx.send(PipelineMessage::Error(e.to_string())).await;
+                        Err(e)
                     }
                 }
-                result.map(|count| count)
             }
-            () = cancel_r.notified() => {
-                warn!("Reader-{} 被终止（其他任务失败）", pair_id);
-                Err(anyhow::anyhow!("Reader-{} 被终止", pair_id))
-            }
-            () = async {
-                if matches!(stream_mode, StreamMode::Infinite) {
-                    let _ = tokio::signal::ctrl_c().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                println!("[Pipeline] 正在停止...");
-                info!("[Pipeline] 收到 Ctrl+C 信号，开始优雅关闭");
-                shutdown_r.store(true, Ordering::Relaxed);
+            () = reader_cancel.cancelled() => {
+                warn!("Reader-{} being eliminated.【outside】", pair_id);
                 reader.shutdown();
-                cancel_r.notify_waiters();
-                Ok(0)
+                Err(anyhow::anyhow!("Reader-{} process terminates unexpectedly.", pair_id))
             }
         }
     });
 
     let w = Arc::clone(&writer);
-    let cancel_w = Arc::clone(&cancel);
+    let writer_cancel = cancel_token.clone();
     let w_handle = tokio::spawn(async move {
         tokio::select! {
             result = w.write_data(write_task, rx) => {
                 if let Err(ref e) = result {
                     error!("Writer-{} 失败: {}", pair_id, e);
-                    cancel_w.notify_waiters();
                 }
                 result
             }
-            () = cancel_w.notified() => {
+            () = writer_cancel.cancelled() => {
                 warn!("Writer-{} 正常关闭", pair_id);
                 Ok(0)
             }
         }
     });
 
-    let reader_result = match r_handle.await {
-        Ok(r) => r,
-        Err(e) => Err(anyhow::anyhow!("Reader-{} 任务崩溃: {}", pair_id, e)),
+    let reader_result = r_handle
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("Reader-{} 任务崩溃: {}", pair_id, e)));
+    let writer_result = w_handle
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("Writer-{} 任务崩溃: {}", pair_id, e)));
+
+    let (read_count, read_err) = match reader_result {
+        Ok(n) => (n, None),
+        Err(e) => (0, Some(e)),
+    };
+    let (write_count, write_err) = match writer_result {
+        Ok(n) => (n, None),
+        Err(e) => (0, Some(e)),
     };
 
-    let writer_result = match w_handle.await {
-        Ok(r) => r,
-        Err(e) => Err(anyhow::anyhow!("Writer-{} 任务崩溃: {}", pair_id, e)),
+    let error = match (read_err, write_err) {
+        (Some(r), Some(w)) => Some(anyhow::anyhow!("R/W FULL FAIL: {}; {}", r, w)),
+        (Some(e), None) | (None, Some(e)) => Some(e),
+        _ => None,
     };
 
-    let is_shutdown = shutdown_flag.load(Ordering::Relaxed);
-
-    match (reader_result, writer_result) {
-        (Ok(read_count), Ok(write_count)) => PairResult {
-            pair_id,
-            read_count,
-            write_count,
-            error: None,
-            shutdown: is_shutdown,
-        },
-        (Err(e), Ok(_)) => PairResult {
-            pair_id,
-            read_count: 0,
-            write_count: 0,
-            error: Some(e),
-            shutdown: is_shutdown,
-        },
-        (Ok(_), Err(e)) => PairResult {
-            pair_id,
-            read_count: 0,
-            write_count: 0,
-            error: Some(e),
-            shutdown: is_shutdown,
-        },
-        (Err(reader_err), Err(writer_err)) => PairResult {
-            pair_id,
-            read_count: 0,
-            write_count: 0,
-            error: Some(anyhow::anyhow!(
-                "Reader/Writer 同时失败: {}; {}",
-                reader_err,
-                writer_err
-            )),
-            shutdown: is_shutdown,
-        },
+    PairResult {
+        pair_id,
+        read_count,
+        write_count,
+        error,
+        shutdown: was_cancelled,
     }
 }
 
@@ -351,10 +307,9 @@ async fn run_task_group(
     buffer_size: usize,
     batch_size: usize,
     record_builder: Arc<RecordBuilder>,
-    cancel: Arc<Notify>,
+    cancel_token: CancellationToken,
     reader_bar: indicatif::ProgressBar,
     writer_bar: indicatif::ProgressBar,
-    stream_mode: StreamMode,
 ) -> GroupResult {
     let mut queue: VecDeque<(usize, ReadTask, WriteTask)> = VecDeque::from(tasks);
     let mut running = FuturesUnordered::new();
@@ -375,8 +330,7 @@ async fn run_task_group(
                 buffer_size,
                 batch_size,
                 Arc::clone(&record_builder),
-                Arc::clone(&cancel),
-                stream_mode,
+                cancel_token.clone(),
             ));
         } else {
             break;
@@ -396,7 +350,7 @@ async fn run_task_group(
             if first_error.is_none() && !pair_result.shutdown {
                 first_error = Some(e);
             }
-            cancel.notify_waiters();
+            cancel_token.cancel();
         } else {
             total_read += pair_result.read_count;
             total_written += pair_result.write_count;
@@ -420,8 +374,7 @@ async fn run_task_group(
                         buffer_size,
                         batch_size,
                         Arc::clone(&record_builder),
-                        Arc::clone(&cancel),
-                        stream_mode,
+                        cancel_token.clone(),
                     ));
                 } else {
                     break;
@@ -445,12 +398,12 @@ async fn run_paired_pipeline(
     reader: Arc<dyn DataReader>,
     writer: Arc<dyn DataWriter>,
     record_builder: Arc<RecordBuilder>,
+    cancel_token: CancellationToken,
 ) -> Result<PipelineStats> {
     let start_time = Instant::now();
 
     let reader_split = reader.split(config.reader_threads).await?;
     let task_count = reader_split.tasks.len();
-    let stream_mode = reader_split.stream_mode;
     info!(
         "[{}] 总记录数 {}, 切分为 {} 个任务",
         reader.description(),
@@ -504,7 +457,6 @@ async fn run_paired_pipeline(
         task_count, need_channel, group_count, per_group_channel
     );
 
-    let cancel = Arc::new(Notify::new());
     let mut group_handles = FuturesUnordered::new();
 
     for (group_id, tasks) in grouped_tasks.into_iter().enumerate() {
@@ -531,10 +483,9 @@ async fn run_paired_pipeline(
             config.buffer_size,
             config.batch_size,
             Arc::clone(&record_builder),
-            Arc::clone(&cancel),
+            cancel_token.clone(),
             reader_bar.clone(),
             writer_bar.clone(),
-            stream_mode,
         );
 
         group_handles.push(tokio::spawn(group_future));

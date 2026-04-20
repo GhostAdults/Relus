@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 
-use crate::{JsonStream, ReadTask, DataReaderJob, DataReaderTask, SplitReaderResult, StreamMode};
+use crate::{DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult, StreamMode};
 use mysql_cdc::events::binlog_event::BinlogEvent;
 use mysql_cdc::events::row_events::mysql_value::MySqlValue;
 use mysql_cdc::events::row_events::row_data::RowData;
@@ -53,10 +53,7 @@ impl BinlogConfig {
                 .and_then(|v| v.as_str())
                 .unwrap_or("127.0.0.1")
                 .to_string(),
-            port: source
-                .get("port")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(3306) as u16,
+            port: source.get("port").and_then(|v| v.as_u64()).unwrap_or(3306) as u16,
             username: source
                 .get("username")
                 .and_then(|v| v.as_str())
@@ -263,7 +260,7 @@ impl DataReaderJob for BinlogReader {
     /// Binlog 是单流有序消费，返回单个 task
     async fn split(&self, _reader_threads: usize) -> Result<SplitReaderResult> {
         Ok(SplitReaderResult {
-            total_records: 1, // 由于是流式消费，无法预知总记录数，暂时返回 1
+            total_records: 0, // CDC 流式消费，无法预知总量，触发 spinner 模式
             stream_mode: StreamMode::Infinite,
             tasks: vec![ReadTask {
                 task_id: 0,
@@ -298,7 +295,7 @@ impl DataReaderTask for BinlogReader {
 
         tokio::task::spawn_blocking(move || {
             if let Err(e) = run_binlog_stream(config, column_names, tx, shutdown) {
-                tracing::error!("Binlog stream ended: {:?}", e);
+                tracing::error!("Binlog stream ended with error: {:?}", e);
             }
         });
 
@@ -311,7 +308,7 @@ impl DataReaderTask for BinlogReader {
 
     fn shutdown(&self) {
         self.job.shutdown.store(true, Ordering::Relaxed);
-        tracing::info!("[BinlogReader] shutdown");
+        tracing::info!("[BinlogReader] SHUTDOWN");
     }
 }
 
@@ -474,7 +471,7 @@ fn run_binlog_stream(
         }
     }
 
-    tracing::info!("[BinlogReader] Binlog stream 正常结束");
+    tracing::info!("[BinlogReader] Binlog stream ended");
     Ok(())
 }
 
