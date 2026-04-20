@@ -260,7 +260,7 @@ impl DataReaderJob for BinlogReader {
     /// Binlog 是单流有序消费，返回单个 task
     async fn split(&self, _reader_threads: usize) -> Result<SplitReaderResult> {
         Ok(SplitReaderResult {
-            total_records: 0, // CDC 流式消费，无法预知总量，触发 spinner 模式
+            total_records: 1, // 由于是流式消费，无法预知总记录数，暂时返回 1
             stream_mode: StreamMode::Infinite,
             tasks: vec![ReadTask {
                 task_id: 0,
@@ -329,11 +329,11 @@ fn run_binlog_stream(
     use std::time::Duration;
 
     println!(
-        "[BinlogReader] 正在连接 {}:{} (server_id={})...",
+        "[BinlogReader] 正在连接... {}:{} (server_id={})...",
         config.hostname, config.port, config.server_id
     );
     tracing::info!(
-        "[BinlogReader] 连接中: {}:{} (server_id={})",
+        "[BinlogReader] Connected: {}:{} (server_id={})",
         config.hostname,
         config.port,
         config.server_id
@@ -366,7 +366,7 @@ fn run_binlog_stream(
     let mut client = BinlogClient::new(options);
 
     let replicate_result = client.replicate().map_err(|e| {
-        let msg = format!("Binlog 连接失败: {:?}", e);
+        let msg = format!("Error: Binlog connection failed: {:?}", e);
         tracing::error!("[BinlogReader] {}", msg);
         let _ = tx.blocking_send(Err(anyhow::anyhow!("{}", msg)));
         anyhow::anyhow!("{}", msg)
@@ -375,7 +375,7 @@ fn run_binlog_stream(
     let filter = config.table_filter.as_deref().unwrap_or("*");
     println!("[BinlogReader] 已连接，开始监听 Binlog (filter={})", filter);
     tracing::info!(
-        "[BinlogReader] 连接成功，开始消费 Binlog (filter={})",
+        "[BinlogReader] Connect successfully, start consumption Binlog (filter={})",
         filter
     );
 
@@ -388,7 +388,7 @@ fn run_binlog_stream(
         }
 
         let (header, event) = result.map_err(|e| {
-            let msg = format!("Binlog 事件解析失败: {:?}", e);
+            let msg = format!("Error: Binlog event parsing failed: {:?}", e);
             tracing::error!("[BinlogReader] {}", msg);
             let _ = tx.blocking_send(Err(anyhow::anyhow!("{}", msg)));
             anyhow::anyhow!("{}", msg)
