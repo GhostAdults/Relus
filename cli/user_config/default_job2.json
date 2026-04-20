@@ -14,7 +14,9 @@
           "username": "root",
           "password": "123456",
           "table": "user_x",
-          "key_columns": ["id"],
+          "key_columns": [
+            "id"
+          ],
           "max_connections": 20,
           "acquire_timeout_secs": 30,
           "use_transaction": true
@@ -25,7 +27,7 @@
   "target": {
     "name": "db_target",
     "type": "database",
-    "writer_mode": "insert",
+    "writer_mode": "upsert",
     "config": {
       "connection": {
         "type": "mysql",
@@ -36,7 +38,7 @@
         "password": "123456",
         "table": "user_w",
         "key_columns": [
-          "id"
+          "userAccount"
         ],
         "max_connections": 20,
         "acquire_timeout_secs": 30,
@@ -46,7 +48,7 @@
   },
   "column_mapping": {
     "id": "id",
-    "userAccount": "expr: 'IMPORTED'",
+    "userAccount": "userAccount",
     "userPassword": "userPassword"
   },
   "column_types": {

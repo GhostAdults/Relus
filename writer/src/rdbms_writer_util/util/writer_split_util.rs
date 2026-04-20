@@ -3,19 +3,15 @@
 use std::sync::Arc;
 
 use relus_common::data_source_config::DbConfig;
+use relus_common::job_config::WriteMode;
 use relus_common::JobConfig;
 
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use crate::{SplitWriterResult, WriteMode, WriteTask};
+use crate::{SplitWriterResult, WriteTask};
 
 /// 切分 Writer 任务
 pub fn do_split(original_config: &Arc<JobConfig>, advice_number: usize) -> SplitWriterResult {
-    let mode = original_config
-        .target
-        .writer_mode
-        .as_deref()
-        .map(WriteMode::from_str)
-        .unwrap_or(WriteMode::Insert);
+    let mode = WriteMode::from_config(original_config);
 
     let batch_size = original_config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
 

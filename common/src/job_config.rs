@@ -31,6 +31,50 @@ impl Default for SyncMode {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteMode {
+    Insert,
+    Upsert,
+    Update,
+    Delete,
+}
+
+impl WriteMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "upsert" => WriteMode::Upsert,
+            "update" => WriteMode::Update,
+            "delete" => WriteMode::Delete,
+            _ => WriteMode::Insert,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WriteMode::Insert => "insert",
+            WriteMode::Upsert => "upsert",
+            WriteMode::Update => "update",
+            WriteMode::Delete => "delete",
+        }
+    }
+
+    pub fn from_config(config: &JobConfig) -> Self {
+        config
+            .target
+            .writer_mode
+            .as_deref()
+            .map(WriteMode::from_str)
+            .unwrap_or(WriteMode::Insert)
+    }
+}
+
+impl Default for WriteMode {
+    fn default() -> Self {
+        WriteMode::Insert
+    }
+}
+
 impl fmt::Display for JobConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let json = serde_json::to_string_pretty(self).map_err(|_| fmt::Error)?;

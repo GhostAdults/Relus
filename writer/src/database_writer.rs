@@ -15,7 +15,8 @@ use crate::rdbms_writer_util::rdbms_writer::{
     PipelineRowWriter, RdbmsConfig, RdbmsJob, RdbmsWriter,
 };
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
-use crate::{SplitWriterResult, WriteMode, WriteTask, DataWriterJob, DataWriterTask};
+use relus_common::job_config::WriteMode;
+use crate::{SplitWriterResult, WriteTask, DataWriterJob, DataWriterTask};
 
 pub struct DatabaseWriter {
     job: DatabaseJob,
@@ -40,13 +41,7 @@ impl DatabaseJob {
     fn build_rdbms_config(&self) -> Result<RdbmsConfig> {
         let db_config = self.original_config.target.parse_database_config()?;
 
-        let mode = self
-            .original_config
-            .target
-            .writer_mode
-            .as_deref()
-            .map(WriteMode::from_str)
-            .unwrap_or(WriteMode::Insert);
+        let mode = WriteMode::from_config(&self.original_config);
 
         let batch_size = self
             .original_config

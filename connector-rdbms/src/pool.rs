@@ -157,7 +157,15 @@ pub trait DbExecutor: Send + Sync {
     async fn execute_with_params(&self, sql: &str, params: &[TypedVal]) -> Result<u64>;
 
     /// 批量执行参数化 SQL
-    async fn execute_batch(&self, base_sql: &str, rows: &[Vec<TypedVal>]) -> Result<u64> {
+    ///
+    /// 拼接顺序：base_sql + VALUES (?,?,?),(?,?) + suffix
+    /// suffix 用于 upsert 场景（ON DUPLICATE KEY UPDATE ... / ON CONFLICT ...）
+    async fn execute_batch(
+        &self,
+        base_sql: &str,
+        rows: &[Vec<TypedVal>],
+        suffix: &str,
+    ) -> Result<u64> {
         if rows.is_empty() {
             return Ok(0);
         }
@@ -172,11 +180,11 @@ pub trait DbExecutor: Send + Sync {
                 if j > 0 {
                     sql.push_str(", ");
                 }
-                // 默认使用 ? 占位符（MySQL），具体实现可重写
                 sql.push('?');
             }
             sql.push(')');
         }
+        sql.push_str(suffix);
         self.execute(&sql).await
     }
 }
@@ -221,7 +229,12 @@ impl DbExecutor for PgExecutorRef {
         Ok(result.rows_affected())
     }
 
-    async fn execute_batch(&self, base_sql: &str, rows: &[Vec<TypedVal>]) -> Result<u64> {
+    async fn execute_batch(
+        &self,
+        base_sql: &str,
+        rows: &[Vec<TypedVal>],
+        suffix: &str,
+    ) -> Result<u64> {
         if rows.is_empty() {
             return Ok(0);
         }
@@ -243,6 +256,7 @@ impl DbExecutor for PgExecutorRef {
             }
             sql.push(')');
         }
+        sql.push_str(suffix);
 
         let mut query = sqlx::query(&sql);
         for row in rows {
@@ -350,7 +364,12 @@ impl DbExecutor for MySqlExecutorRef {
         Ok(result.rows_affected())
     }
 
-    async fn execute_batch(&self, base_sql: &str, rows: &[Vec<TypedVal>]) -> Result<u64> {
+    async fn execute_batch(
+        &self,
+        base_sql: &str,
+        rows: &[Vec<TypedVal>],
+        suffix: &str,
+    ) -> Result<u64> {
         if rows.is_empty() {
             return Ok(0);
         }
@@ -371,6 +390,7 @@ impl DbExecutor for MySqlExecutorRef {
             }
             sql.push(')');
         }
+        sql.push_str(suffix);
 
         let mut query = sqlx::query(&sql);
         for row in rows {

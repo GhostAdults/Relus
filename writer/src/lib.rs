@@ -5,7 +5,7 @@ pub use database_writer::{DatabaseJob, DatabaseWriter};
 pub use rdbms_writer_util::rdbms_writer::{RdbmsConfig, RdbmsJob, RdbmsWriter, RowWriter};
 
 use anyhow::Result;
-use relus_common::job_config::JobConfig;
+use relus_common::job_config::{JobConfig, WriteMode};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::mpsc;
@@ -27,29 +27,6 @@ pub struct WriteTask {
 /// Job 切分结果
 pub struct SplitWriterResult {
     pub tasks: Vec<WriteTask>,
-}
-
-/// 写入模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteMode {
-    Insert,
-    Upsert,
-}
-
-impl WriteMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "upsert" => WriteMode::Upsert,
-            _ => WriteMode::Insert,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WriteMode::Insert => "insert",
-            WriteMode::Upsert => "upsert",
-        }
-    }
 }
 
 /// Writer Job trait

@@ -260,7 +260,7 @@ impl DataReaderJob for BinlogReader {
     /// Binlog 是单流有序消费，返回单个 task
     async fn split(&self, _reader_threads: usize) -> Result<SplitReaderResult> {
         Ok(SplitReaderResult {
-            total_records: 1, // 由于是流式消费，无法预知总记录数，暂时返回 1
+            total_records: 0, // CDC 流式消费，无法预知总量��触发 spinner 模式
             stream_mode: StreamMode::Infinite,
             tasks: vec![ReadTask {
                 task_id: 0,

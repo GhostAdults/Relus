@@ -177,6 +177,7 @@ async fn csas(
     batch_size: usize,
     builder: &RecordBuilder,
     tx: &mpsc::Sender<PipelineMessage>,
+    reader_bar: &indicatif::ProgressBar,
 ) -> Result<usize> {
     let stream = reader.read_data(task).await?;
     let mut sent = 0;
@@ -188,22 +189,26 @@ async fn csas(
         buffer.push(json_val);
 
         if buffer.len() >= batch_size {
+            let count = buffer.len();
             let message = builder.build_message(&buffer)?;
             tx.send(message)
                 .await
                 .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
-            sent += buffer.len();
+            sent += count;
+            reader_bar.inc(count as u64);
             buffer.clear();
         }
     }
 
     // 发送残余数据
     if !buffer.is_empty() {
+        let count = buffer.len();
         let message = builder.build_message(&buffer)?;
         tx.send(message)
             .await
             .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
-        sent += buffer.len();
+        sent += count;
+        reader_bar.inc(count as u64);
     }
 
     info!("Reader-{} 已发送 {} 条（core mapping）", pair_id, sent);
@@ -220,6 +225,8 @@ async fn run_task_pair(
     batch_size: usize,
     record_builder: Arc<RecordBuilder>,
     cancel_token: CancellationToken,
+    reader_bar: indicatif::ProgressBar,
+    writer_bar: indicatif::ProgressBar,
 ) -> PairResult {
     let (tx, rx) = mpsc::channel(buffer_size);
     let was_cancelled = cancel_token.is_cancelled();
@@ -227,9 +234,10 @@ async fn run_task_pair(
     let r = Arc::clone(&reader);
     let builder = Arc::clone(&record_builder);
     let reader_cancel = cancel_token.clone();
+    let r_bar = reader_bar.clone();
     let r_handle = tokio::spawn(async move {
         tokio::select! {
-            result = csas(pair_id, r, &read_task, batch_size, &builder, &tx) => {
+            result = csas(pair_id, r, &read_task, batch_size, &builder, &tx, &r_bar) => {
                 match result {
                     Ok(count) => {
                         let _ = tx.send(PipelineMessage::ReaderFinished).await;
@@ -250,11 +258,26 @@ async fn run_task_pair(
         }
     });
 
+    // 中间转发 task: rx → writer_bar.inc → tx2，Writer 拿 rx2
+    let (tx2, rx2) = mpsc::channel(buffer_size);
+    let w_bar = writer_bar.clone();
+    let relay_handle = tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(msg) = rx.recv().await {
+            if let PipelineMessage::DataBatch(rows) = &msg {
+                w_bar.inc(rows.len() as u64);
+            }
+            if tx2.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let w = Arc::clone(&writer);
     let writer_cancel = cancel_token.clone();
     let w_handle = tokio::spawn(async move {
         tokio::select! {
-            result = w.write_data(write_task, rx) => {
+            result = w.write_data(write_task, rx2) => {
                 if let Err(ref e) = result {
                     error!("Writer-{} 失败: {}", pair_id, e);
                 }
@@ -266,6 +289,9 @@ async fn run_task_pair(
             }
         }
     });
+
+    // 确保 relay task 不泄漏
+    let _ = relay_handle.await;
 
     let reader_result = r_handle
         .await
@@ -331,6 +357,8 @@ async fn run_task_group(
                 batch_size,
                 Arc::clone(&record_builder),
                 cancel_token.clone(),
+                reader_bar.clone(),
+                writer_bar.clone(),
             ));
         } else {
             break;
@@ -354,8 +382,6 @@ async fn run_task_group(
         } else {
             total_read += pair_result.read_count;
             total_written += pair_result.write_count;
-            reader_bar.inc(pair_result.read_count as u64);
-            writer_bar.inc(pair_result.write_count as u64);
             info!(
                 "TaskGroup-{} 的 Pair-{} 完成，读取 {} 条，写入 {} 条",
                 group_id, pair_result.pair_id, pair_result.read_count, pair_result.write_count
@@ -375,6 +401,8 @@ async fn run_task_group(
                         batch_size,
                         Arc::clone(&record_builder),
                         cancel_token.clone(),
+                        reader_bar.clone(),
+                        writer_bar.clone(),
                     ));
                 } else {
                     break;
