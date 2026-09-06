@@ -7,8 +7,8 @@ use crate::run_scheduler;
 use crate::run_serve;
 use clap::{Parser, Subcommand};
 use relus_common::JobConfig;
-use relus_connector_rdbms::pool::detect_database_kind;
-use relus_connector_rdbms::pool::DatabaseKind;
+use relus_connector_rdbms::connector::{list_tables_mysql, list_tables_postgres};
+use relus_connector_rdbms::pool::{detect_database_kind, get_db_pool, DatabaseKind};
 use relus_reader::rdbms_reader_util::util::client_tool::{extract_by_path, fetch_json};
 
 use anyhow::{bail, Context, Result};
@@ -118,22 +118,15 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
         }
         Commands::ListTables { db_url, db_type } => {
             let kind = detect_database_kind(&db_url, db_type)?;
+            let (pool_key, _) = get_db_pool(&db_url, kind, 5, None, None).await?;
             match kind {
                 DatabaseKind::Postgres => {
-                    let pool = PgPoolOptions::new()
-                        .max_connections(5)
-                        .connect(&db_url)
-                        .await?;
-                    for table in list_tables_postgres(&pool).await? {
+                    for table in list_tables_postgres(&pool_key).await? {
                         println!("{}", table);
                     }
                 }
                 DatabaseKind::Mysql => {
-                    let pool = MySqlPoolOptions::new()
-                        .max_connections(5)
-                        .connect(&db_url)
-                        .await?;
-                    for table in list_tables_mysql(&pool).await? {
+                    for table in list_tables_mysql(&pool_key).await? {
                         println!("{}", table);
                     }
                 }
@@ -299,28 +292,6 @@ fn print_run_result(result: &crate::core::runner::RunResult) {
             );
         }
     }
-}
-
-async fn list_tables_postgres(pool: &PgPool) -> Result<Vec<String>> {
-    let rows = sqlx::query("select tablename from pg_catalog.pg_tables where schemaname not in ('pg_catalog','information_schema')")
-        .fetch_all(pool)
-        .await?;
-    let mut out = Vec::new();
-    for r in rows {
-        let name: String = r.try_get("tablename")?;
-        out.push(name);
-    }
-    Ok(out)
-}
-
-async fn list_tables_mysql(pool: &MySqlPool) -> Result<Vec<String>> {
-    let rows = sqlx::query("show tables").fetch_all(pool).await?;
-    let mut out = Vec::new();
-    for r in rows {
-        let v: String = r.try_get(0)?;
-        out.push(v);
-    }
-    Ok(out)
 }
 
 #[derive(Clone)]

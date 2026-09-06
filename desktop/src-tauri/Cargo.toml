@@ -1,0 +1,31 @@
+[package]
+name = "relus-desktop"
+version = "0.1.0"
+description = "A"
+authors = ["ghosta"]
+license = ""
+repository = ""
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+path = "src/lib.rs"
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.11.3", features = [] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+
+relus_core = { workspace = true }
+relus_common = { workspace = true }
+relus_connector_rdbms = { workspace = true }
+sqlx = { workspace = true }

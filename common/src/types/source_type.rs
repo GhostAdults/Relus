@@ -25,10 +25,48 @@ pub enum SourceType {
     File,
     API,
     Database,
+    HightGo,
     Other(String),
 }
 
 impl SourceType {
+       /// 全部具名变体。`Other` 由调用方自定义输入，不属于固定选项。
+      ///
+      /// 新增变体时同步补充此处，使 CLI、API 和桌面端共享同一份可选值。
+      pub const NAMED: [SourceType; 15] = [
+          SourceType::MySQL,
+          SourceType::PostgreSQL,
+          SourceType::SQLServer,
+          SourceType::Oracle,
+          SourceType::SQLite,
+          SourceType::ClickHouse,
+          SourceType::Database,
+          SourceType::MongoDB,
+          SourceType::Redis,
+          SourceType::Elasticsearch,
+          SourceType::Kafka,
+          SourceType::S3,
+          SourceType::File,
+          SourceType::API,
+          SourceType::HightGo,
+      ];
+
+      /// 数据源分类，供界面分组和能力判断使用。
+      pub fn category(&self) -> &'static str {
+          if self.is_rdbms() {
+              "rdbms"
+          } else if self.is_nosql() {
+              "nosql"
+          } else if self.is_streaming() {
+              "streaming"
+          } else if self.is_file_based() {
+              "file"
+          } else if self.is_api() {
+              "api"
+          } else {
+              "other"
+          }
+      }
     pub fn as_str(&self) -> &str {
         match self {
             SourceType::MySQL => "mysql",
@@ -45,6 +83,7 @@ impl SourceType {
             SourceType::File => "file",
             SourceType::API => "api",
             SourceType::Database => "database",
+            SourceType::HightGo => "hightgo",
             SourceType::Other(s) => s,
         }
     }

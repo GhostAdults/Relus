@@ -1,9 +1,56 @@
 use super::control::{SchedulerControlHandle, SchedulerError, SchedulerResponse};
 use std::sync::Arc;
+
+use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 const PROMPT: &str = "relus_cli> ";
+const AVAILABLE_COMMANDS_HINT: &str =
+    "Available commands: status [job_id], submit <path>, cancel <job_id>, exit";
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "relus-repl",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_help_subcommand = true,
+    disable_version_flag = true
+)]
+struct ReplArgs {
+    #[command(subcommand)]
+    command: ParsedReplCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ParsedReplCommand {
+    #[command(disable_help_flag = true)]
+    Status {
+        #[arg(allow_hyphen_values = true)]
+        job_id: Option<String>,
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        _extra: Vec<String>,
+    },
+    #[command(disable_help_flag = true)]
+    Submit {
+        #[arg(allow_hyphen_values = true)]
+        path: String,
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        _extra: Vec<String>,
+    },
+    #[command(disable_help_flag = true)]
+    Cancel {
+        #[arg(allow_hyphen_values = true)]
+        job_id: String,
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        _extra: Vec<String>,
+    },
+    #[command(alias = "quit", disable_help_flag = true)]
+    Exit {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        _extra: Vec<String>,
+    },
+}
 
 /// REPL 命令
 #[derive(Debug)]
@@ -41,52 +88,66 @@ fn tokenize(input: &str) -> Vec<String> {
     tokens
 }
 
+impl From<ParsedReplCommand> for ReplCommand {
+    fn from(command: ParsedReplCommand) -> Self {
+        match command {
+            ParsedReplCommand::Status { job_id, .. } => Self::Status { job_id },
+            ParsedReplCommand::Submit { path, .. } => Self::Submit { path },
+            ParsedReplCommand::Cancel { job_id, .. } => Self::Cancel { job_id },
+            ParsedReplCommand::Exit { .. } => Self::Exit,
+        }
+    }
+}
+
 impl ReplCommand {
     pub fn parse(input: &str) -> Self {
         let tokens = tokenize(input);
-        let cmd = match tokens.first() {
-            Some(c) => c.as_str(),
-            None => {
-                return Self::Invalid {
-                    raw: String::new(),
-                    hint: String::new(),
-                }
-            }
+        let Some(command_name) = tokens.first().cloned() else {
+            return Self::Invalid {
+                raw: String::new(),
+                hint: String::new(),
+            };
         };
 
-        match cmd {
-            "status" => match tokens.get(1) {
-                None => Self::Status { job_id: None },
-                Some(id) => Self::Status {
-                    job_id: Some(id.clone()),
+        if tokens.get(1).is_some_and(|argument| argument == "--") {
+            return match command_name.as_str() {
+                "status" => Self::Status {
+                    job_id: Some("--".to_string()),
                 },
-            },
-            "submit" => match tokens.get(1) {
-                Some(path) => Self::Submit {
-                    path: path.clone(),
+                "submit" => Self::Submit {
+                    path: "--".to_string(),
                 },
-                None => Self::Invalid {
-                    raw: "submit".to_string(),
+                "cancel" => Self::Cancel {
+                    job_id: "--".to_string(),
+                },
+                "exit" | "quit" => Self::Exit,
+                _ => Self::unknown(command_name),
+            };
+        }
+
+        match ReplArgs::try_parse_from(tokens) {
+            Ok(args) => args.command.into(),
+            Err(_) => match command_name.as_str() {
+                "submit" => Self::Invalid {
+                    raw: command_name,
                     hint: "Usage: submit <path>".to_string(),
                 },
-            },
-            "cancel" => match tokens.get(1) {
-                Some(id) => Self::Cancel {
-                    job_id: id.clone(),
-                },
-                None => Self::Invalid {
-                    raw: "cancel".to_string(),
+                "cancel" => Self::Invalid {
+                    raw: command_name,
                     hint: "Usage: cancel <job_id>".to_string(),
                 },
+                _ => Self::unknown(command_name),
             },
-            "exit" | "quit" => Self::Exit,
-            _ => Self::Invalid {
-                raw: cmd.to_string(),
-                hint: format!(
-                    "(error) Unknown command '{}'. Available commands: status [job_id], submit <path>, cancel <job_id>, exit",
-                    cmd
-                ),
-            },
+        }
+    }
+
+    fn unknown(command_name: String) -> Self {
+        Self::Invalid {
+            hint: format!(
+                "(error) Unknown command '{}'. {}",
+                command_name, AVAILABLE_COMMANDS_HINT
+            ),
+            raw: command_name,
         }
     }
 }
@@ -264,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_commands() {
+    fn parse_valid_commands() {
         assert!(matches!(ReplCommand::parse("exit"), ReplCommand::Exit));
         assert!(matches!(ReplCommand::parse("quit"), ReplCommand::Exit));
         assert!(matches!(
@@ -272,12 +333,108 @@ mod tests {
             ReplCommand::Status { job_id: None }
         ));
         assert!(matches!(
+            ReplCommand::parse("status job_1"),
+            ReplCommand::Status { job_id: Some(job_id) } if job_id == "job_1"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("submit job.json"),
+            ReplCommand::Submit { path } if path == "job.json"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("cancel job_1"),
+            ReplCommand::Cancel { job_id } if job_id == "job_1"
+        ));
+    }
+
+    #[test]
+    fn parse_preserves_original_errors() {
+        assert!(matches!(
+            ReplCommand::parse(""),
+            ReplCommand::Invalid { raw, hint } if raw.is_empty() && hint.is_empty()
+        ));
+        assert!(matches!(
+            ReplCommand::parse("submit"),
+            ReplCommand::Invalid { raw, hint }
+                if raw == "submit" && hint == "Usage: submit <path>"
+        ));
+        assert!(matches!(
             ReplCommand::parse("cancel"),
-            ReplCommand::Invalid { .. }
+            ReplCommand::Invalid { raw, hint }
+                if raw == "cancel" && hint == "Usage: cancel <job_id>"
         ));
         assert!(matches!(
             ReplCommand::parse("foo bar"),
-            ReplCommand::Invalid { .. }
+            ReplCommand::Invalid { raw, hint }
+                if raw == "foo"
+                    && hint == "(error) Unknown command 'foo'. Available commands: status [job_id], submit <path>, cancel <job_id>, exit"
+        ));
+    }
+
+    #[test]
+    fn parse_quoted_path() {
+        assert!(matches!(
+            ReplCommand::parse(r#"submit "C:\my path\job.json""#),
+            ReplCommand::Submit { path } if path == r"C:\my path\job.json"
+        ));
+    }
+
+    #[test]
+    fn parse_hyphen_values() {
+        assert!(matches!(
+            ReplCommand::parse("status --help"),
+            ReplCommand::Status { job_id: Some(job_id) } if job_id == "--help"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("submit --config.json"),
+            ReplCommand::Submit { path } if path == "--config.json"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("cancel -1"),
+            ReplCommand::Cancel { job_id } if job_id == "-1"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("status --"),
+            ReplCommand::Status { job_id: Some(job_id) } if job_id == "--"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("submit --"),
+            ReplCommand::Submit { path } if path == "--"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("cancel --"),
+            ReplCommand::Cancel { job_id } if job_id == "--"
+        ));
+    }
+
+    #[test]
+    fn parse_ignores_extra_arguments() {
+        assert!(matches!(
+            ReplCommand::parse("status job_1 ignored"),
+            ReplCommand::Status { job_id: Some(job_id) } if job_id == "job_1"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("submit job.json ignored"),
+            ReplCommand::Submit { path } if path == "job.json"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("cancel job_1 ignored"),
+            ReplCommand::Cancel { job_id } if job_id == "job_1"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("quit ignored"),
+            ReplCommand::Exit
+        ));
+    }
+
+    #[test]
+    fn parse_commands_are_case_sensitive() {
+        assert!(matches!(
+            ReplCommand::parse("Status"),
+            ReplCommand::Invalid { raw, .. } if raw == "Status"
+        ));
+        assert!(matches!(
+            ReplCommand::parse("QUIT"),
+            ReplCommand::Invalid { raw, .. } if raw == "QUIT"
         ));
     }
 }

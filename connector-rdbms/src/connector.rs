@@ -1,42 +1,45 @@
 use crate::metadata::{ColMeta, TableMeta};
-use crate::pool::RdbmsPool;
-use anyhow::Result;
-use sqlx::{MySqlPool, PgPool, Row as _};
+use crate::pool::{
+    detect_database_kind, get_db_pool, get_db_pool_by_key, DatabaseKind, RdbmsPool,
+};
+use anyhow::{bail, Context, Result};
+use sqlx::Row as _;
 use tracing::info;
 
 /// RDBMS 通用操作：表发现、列探测、批量查询
 pub struct RdbmsConnector {
-    pool: RdbmsPool,
+    pool_key: String,
+    kind: DatabaseKind,
 }
 
 impl RdbmsConnector {
-    pub fn new(pool: RdbmsPool) -> Self {
-        info!("[RdbmsConnector] 已连接 {}", pool.db_type());
-        Self { pool }
-    }
-
     pub async fn connect(url: &str) -> Result<Self> {
-        let pool = RdbmsPool::from_url(url).await?;
-        Ok(Self::new(pool))
+        let kind = detect_database_kind(url, None)?;
+        let (pool_key, _) = get_db_pool(url, kind, 5, None, None).await?;
+        info!("[RdbmsConnector] 已连接 {}", database_kind_name(kind));
+        Ok(Self {
+            pool_key,
+            kind,
+        })
     }
 
     pub fn db_type(&self) -> &str {
-        self.pool.db_type()
+        database_kind_name(self.kind)
     }
 
     /// 列出用户表
     pub async fn list_tables(&self) -> Result<Vec<String>> {
-        match &self.pool {
-            RdbmsPool::Postgres(p) => list_tables_postgres(p).await,
-            RdbmsPool::Mysql(p) => list_tables_mysql(p).await,
+        match self.kind {
+            DatabaseKind::Postgres => list_tables_postgres(&self.pool_key).await,
+            DatabaseKind::Mysql => list_tables_mysql(&self.pool_key).await,
         }
     }
 
     /// 探测表结构
     pub async fn describe(&self, table: &str) -> Result<Vec<ColMeta>> {
-        match &self.pool {
-            RdbmsPool::Postgres(p) => fetch_columns_postgres(p, table).await,
-            RdbmsPool::Mysql(p) => fetch_columns_mysql(p, table).await,
+        match self.kind {
+            DatabaseKind::Postgres => fetch_columns_postgres(&self.pool_key, table).await,
+            DatabaseKind::Mysql => fetch_columns_mysql(&self.pool_key, table).await,
         }
     }
 
@@ -56,22 +59,46 @@ impl RdbmsConnector {
     }
 }
 
-async fn list_tables_postgres(pool: &PgPool) -> Result<Vec<String>> {
+fn postgres_pool(pool_key: &str) -> Result<sqlx::PgPool> {
+    match get_db_pool_by_key(pool_key).context("获取 PostgreSQL 连接失败")? {
+        RdbmsPool::Postgres(pool) => Ok(pool),
+        RdbmsPool::Mysql(_) => bail!("连接池类型不匹配，预期 PostgreSQL"),
+    }
+}
+
+fn mysql_pool(pool_key: &str) -> Result<sqlx::MySqlPool> {
+    match get_db_pool_by_key(pool_key).context("获取 MySQL 连接失败")? {
+        RdbmsPool::Mysql(pool) => Ok(pool),
+        RdbmsPool::Postgres(_) => bail!("连接池类型不匹配，预期 MySQL"),
+    }
+}
+
+fn database_kind_name(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => "postgres",
+        DatabaseKind::Mysql => "mysql",
+    }
+}
+
+pub async fn list_tables_postgres(pool_key: &str) -> Result<Vec<String>> {
+    let pool = postgres_pool(pool_key)?;
     let rows = sqlx::query(
         "SELECT tablename FROM pg_catalog.pg_tables \
          WHERE schemaname NOT IN ('pg_catalog','information_schema')",
     )
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
     Ok(rows.iter().map(|r| r.get("tablename")).collect())
 }
 
-async fn list_tables_mysql(pool: &MySqlPool) -> Result<Vec<String>> {
-    let rows = sqlx::query("SHOW TABLES").fetch_all(pool).await?;
+pub async fn list_tables_mysql(pool_key: &str) -> Result<Vec<String>> {
+    let pool = mysql_pool(pool_key)?;
+    let rows = sqlx::query("SHOW TABLES").fetch_all(&pool).await?;
     Ok(rows.iter().map(|r| r.get::<String, _>(0)).collect())
 }
 
-async fn fetch_columns_postgres(pool: &PgPool, table: &str) -> Result<Vec<ColMeta>> {
+pub async fn fetch_columns_postgres(pool_key: &str, table: &str) -> Result<Vec<ColMeta>> {
+    let pool = postgres_pool(pool_key)?;
     let rows = sqlx::query(
         "SELECT column_name, data_type, is_nullable \
          FROM information_schema.columns \
@@ -79,34 +106,39 @@ async fn fetch_columns_postgres(pool: &PgPool, table: &str) -> Result<Vec<ColMet
          ORDER BY ordinal_position",
     )
     .bind(table)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
-    Ok(rows
-        .iter()
-        .map(|r| ColMeta {
-            name: r.get("column_name"),
-            data_type: r.get("data_type"),
-            nullable: r.get::<String, _>("is_nullable") == "YES",
+    rows.into_iter()
+        .map(|row| {
+            Ok(ColMeta {
+                name: row.try_get("column_name")?,
+                data_type: row.try_get("data_type")?,
+                nullable: row.try_get::<String, _>("is_nullable")? == "YES",
+            })
         })
-        .collect())
+        .collect()
 }
 
-async fn fetch_columns_mysql(pool: &MySqlPool, table: &str) -> Result<Vec<ColMeta>> {
+pub async fn fetch_columns_mysql(pool_key: &str, table: &str) -> Result<Vec<ColMeta>> {
+    let pool = mysql_pool(pool_key)?;
     let rows = sqlx::query(
-        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
+        "SELECT CAST(COLUMN_NAME AS CHAR) AS COLUMN_NAME, \
+                CAST(DATA_TYPE AS CHAR) AS DATA_TYPE, \
+                CAST(IS_NULLABLE AS CHAR) AS IS_NULLABLE \
          FROM information_schema.columns \
          WHERE table_schema = DATABASE() AND table_name = ? \
          ORDER BY ORDINAL_POSITION",
     )
     .bind(table)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
-    Ok(rows
-        .iter()
-        .map(|r| ColMeta {
-            name: r.get("COLUMN_NAME"),
-            data_type: r.get("DATA_TYPE"),
-            nullable: r.get::<String, _>("IS_NULLABLE") == "YES",
+    rows.into_iter()
+        .map(|row| {
+            Ok(ColMeta {
+                name: row.try_get("COLUMN_NAME")?,
+                data_type: row.try_get("DATA_TYPE")?,
+                nullable: row.try_get::<String, _>("IS_NULLABLE")? == "YES",
+            })
         })
-        .collect())
+        .collect()
 }

@@ -72,7 +72,8 @@ pub async fn get_pool_for(ds: &DataSourceConfig) -> Result<Arc<RdbmsPool>> {
             Some(acq_timeout),
             db_config.timezone.clone(),
         )
-        .await?,
+        .await?
+        .1,
     ))
 }
 

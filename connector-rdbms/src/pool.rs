@@ -14,6 +14,7 @@ use sqlx::{MySqlPool, PgPool};
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
+use uuid::Uuid;
 
 use super::util::{database_kind_from_opt_str, DbParams};
 use relus_common::types::UnifiedValue;
@@ -42,7 +43,15 @@ pub struct PoolConfig {
     pub timezone: String,
 }
 
-static DB_POOLS: OnceLock<DashMap<PoolConfig, RdbmsPool>> = OnceLock::new();
+#[derive(Clone)]
+struct CachedPool {
+    key: String,
+    pool: RdbmsPool,
+}
+
+static DB_POOLS: OnceLock<DashMap<PoolConfig, CachedPool>> = OnceLock::new();
+static DB_POOLS_BY_KEY: OnceLock<DashMap<String, RdbmsPool>> = OnceLock::new();
+static DB_POOL_CREATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn create_pool(cfg: &PoolConfig) -> Result<RdbmsPool> {
     let timeout = Duration::from_secs(cfg.timeout_secs.unwrap_or(30));
@@ -84,16 +93,16 @@ fn timezone_offset_string(offset_seconds: i32) -> String {
     format!("{sign}{hours:02}:{minutes:02}")
 }
 
-/// Get or create a database connection pool
-/// 如果存在相同配置的连接池则返回，否则创建新的连接池并缓存
+/// Get or create a database connection pool and its backend cache key.
+/// 如果存在相同配置的连接池则返回原 key，否则创建新池并分配 UUID key。
 pub async fn get_db_pool(
     url: &str,
     kind: DatabaseKind,
     max_conns: u32,
     timeout_secs: Option<u64>,
     timezone: Option<String>,
-) -> Result<RdbmsPool> {
-    let pools: &DashMap<PoolConfig, RdbmsPool> = DB_POOLS.get_or_init(DashMap::new);
+) -> Result<(String, RdbmsPool)> {
+    let pools = DB_POOLS.get_or_init(DashMap::new);
     let timezone = timezone.unwrap_or_else(current_system_timezone);
     let key = PoolConfig {
         kind,
@@ -102,13 +111,38 @@ pub async fn get_db_pool(
         timeout_secs,
         timezone,
     };
-    if let Some(pool) = pools.get(&key) {
-        return Ok(pool.clone());
+    if let Some(cached) = pools.get(&key) {
+        return Ok((cached.key.clone(), cached.pool.clone()));
+    }
+
+    let creation_lock = DB_POOL_CREATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = creation_lock.lock().await;
+    if let Some(cached) = pools.get(&key) {
+        return Ok((cached.key.clone(), cached.pool.clone()));
     }
 
     let pool = create_pool(&key).await?;
-    pools.insert(key, pool.clone());
-    Ok(pool)
+    let pool_key = Uuid::new_v4().to_string();
+    pools.insert(
+        key,
+        CachedPool {
+            key: pool_key.clone(),
+            pool: pool.clone(),
+        },
+    );
+    DB_POOLS_BY_KEY
+        .get_or_init(DashMap::new)
+        .insert(pool_key.clone(), pool.clone());
+    Ok((pool_key, pool))
+}
+
+/// Get an existing pool by its backend-issued key.
+pub fn get_db_pool_by_key(pool_key: &str) -> Result<RdbmsPool> {
+    DB_POOLS_BY_KEY
+        .get_or_init(DashMap::new)
+        .get(pool_key)
+        .map(|pool| pool.clone())
+        .ok_or_else(|| anyhow::anyhow!("数据库连接已失效，请重新连接"))
 }
 
 /// Detect database type from URL or explicit option
@@ -131,7 +165,9 @@ pub fn detect_database_kind(url: &str, explicit: Option<DatabaseKind>) -> Result
 pub async fn get_pool_from_query<T: DbParams>(q: &T) -> Result<RdbmsPool> {
     let db_url = q.resolve_url()?;
     let kind = detect_database_kind(&db_url, database_kind_from_opt_str(&q.resolve_type()))?;
-    get_db_pool(&db_url, kind, 5, None, None).await
+    get_db_pool(&db_url, kind, 5, None, None)
+        .await
+        .map(|(_, pool)| pool)
 }
 
 /// 查询列值的动态类型承载

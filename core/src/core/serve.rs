@@ -1,9 +1,9 @@
+use relus_api::server::StatusCode;
 use relus_common::app_config::config_loader::flatten;
 use relus_common::app_config::value::ConfigValue;
 use relus_common::job_config::JobConfig;
 use relus_common::resp::ApiResp;
 use relus_common::{CreateConfigReq, UpdateConfigReq};
-use relus_api::server::StatusCode;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

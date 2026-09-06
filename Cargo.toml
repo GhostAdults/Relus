@@ -1,6 +1,15 @@
 [workspace]
 
-members = ["core", "cli", "reader", "common", "writer", "connector-rdbms", "api"]
+members = [
+    "core",
+    "cli",
+    "reader",
+    "common",
+    "writer",
+    "connector-rdbms",
+    "api",
+    "desktop/src-tauri",
+]
 resolver = "3"
 
 [workspace.package]

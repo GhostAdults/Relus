@@ -12,6 +12,9 @@ use crate::core::scheduler::{
 };
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
+use relus_api::server::{
+    ApiFuture, ApiHandlerResult, AppState, SchedulerControl, SharedState, StatusCode, SyncExecutor,
+};
 use relus_common::app_config::config_loader::{
     apply_json_defaults, get_config_manager, CONFIG_MANAGER, WATCHER_HOLDER,
 };
@@ -21,9 +24,6 @@ use relus_common::app_config::value::ConfigValue;
 use relus_common::app_config::watcher;
 use relus_common::job_config::JobConfig;
 use relus_common::resp::ApiResp;
-use relus_api::server::{
-    ApiFuture, ApiHandlerResult, AppState, SchedulerControl, SharedState, StatusCode, SyncExecutor,
-};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

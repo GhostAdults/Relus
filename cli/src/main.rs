@@ -2,11 +2,13 @@ use clap::Parser;
 use relus_core::core::cli::{run_cli, Cli};
 use std::process::ExitCode;
 
+
+
 /// 数据同步 cli 入口
 fn main() -> ExitCode {
     let cli: Cli = Cli::parse();
 
-    relus_common::logging::init_file_logger();
+    let _ = relus_common::logging::init_file_logger();
     let default_parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);

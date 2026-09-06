@@ -1,0 +1,403 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  body > div {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+:root {
+  /* Gravity UI theme tokens used by the application palette. */
+  --g-font-family-sans: "Titillium Web", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --g-font-family-monospace: "Roboto Mono", Monaco, Consolas, "Liberation Mono", "Ubuntu Mono", monospace;
+  --g-color-private-brand-50: rgb(108 145 201 / 10%);
+  --g-color-private-brand-100: rgb(108 145 201 / 15%);
+  --g-color-private-brand-150: rgb(108 145 201 / 20%);
+  --g-color-private-brand-200: rgb(108 145 201 / 30%);
+  --g-color-private-brand-300: rgb(108 145 201 / 50%);
+  --g-color-private-brand-400: rgb(108 145 201 / 70%);
+  --g-color-private-brand-500: rgb(108 145 201 / 90%);
+  --g-color-private-brand-550: rgb(108 145 201);
+  --g-color-private-brand-550-solid: rgb(108 145 201);
+  --g-color-private-brand-1000-solid: rgb(45 46 59);
+  --g-color-private-brand-950-solid: rgb(49 52 67);
+  --g-color-private-brand-900-solid: rgb(56 64 84);
+  --g-color-private-brand-850-solid: rgb(64 75 101);
+  --g-color-private-brand-800-solid: rgb(71 87 118);
+  --g-color-private-brand-750-solid: rgb(78 99 134);
+  --g-color-private-brand-700-solid: rgb(86 110 151);
+  --g-color-private-brand-650-solid: rgb(93 122 168);
+  --g-color-private-brand-600-solid: rgb(101 133 184);
+  --g-color-private-brand-500-solid: rgb(123 156 206);
+  --g-color-private-brand-450-solid: rgb(137 167 212);
+  --g-color-private-brand-400-solid: rgb(152 178 217);
+  --g-color-private-brand-350-solid: rgb(167 189 223);
+  --g-color-private-brand-300-solid: rgb(182 200 228);
+  --g-color-private-brand-250-solid: rgb(196 211 233);
+  --g-color-private-brand-200-solid: rgb(211 222 239);
+  --g-color-private-brand-150-solid: rgb(226 233 244);
+  --g-color-private-brand-100-solid: rgb(233 239 247);
+  --g-color-private-brand-50-solid: rgb(240 244 250);
+
+  --background: var(--g-color-private-brand-50-solid);
+  --surface: #ffffff;
+  --surface-muted: var(--g-color-private-brand-50-solid);
+  /* HeroUI table tokens inherit the same global Gravity UI palette. */
+  --surface-secondary: var(--g-color-private-brand-50-solid);
+  --surface-tertiary: var(--g-color-private-brand-100-solid);
+  --surface-foreground: var(--foreground);
+  --separator: var(--g-color-private-brand-150-solid);
+  --separator-tertiary: var(--g-color-private-brand-100-solid);
+  --muted: var(--g-color-private-brand-700-solid);
+  --focus: var(--primary);
+  --foreground: var(--g-color-private-brand-1000-solid);
+  --muted-foreground: var(--g-color-private-brand-700-solid);
+  --subtle-foreground: var(--g-color-private-brand-600-solid);
+  --border: var(--g-color-private-brand-150-solid);
+  --border-strong: var(--g-color-private-brand-300-solid);
+  --border-j: 240 5.9% 90%;
+  --primary: var(--g-color-private-brand-550-solid);
+  --primary-editor: 210 100% 56%;
+  --primary-foreground: 0 0% 100%;
+  --primary-hover: var(--g-color-private-brand-600-solid);
+  --primary-soft: var(--g-color-private-brand-100-solid);
+  --success: #15803d;
+  --success-soft: #f0fdf4;
+  --warning: #a16207;
+  --warning-soft: #fffbeb;
+  --danger: #b91c1c;
+  --danger-soft: #fef2f2;
+}
+
+/* Keep the supplied Gravity UI theme available for components that opt into
+   dark mode, while the desktop shell starts in the light theme. */
+.g-root_theme_dark {
+  --g-color-private-brand-1000-solid: rgb(233 239 247);
+  --g-color-private-brand-950-solid: rgb(226 233 244);
+  --g-color-private-brand-900-solid: rgb(211 222 239);
+  --g-color-private-brand-850-solid: rgb(196 211 233);
+  --g-color-private-brand-800-solid: rgb(182 200 228);
+  --g-color-private-brand-750-solid: rgb(167 189 223);
+  --g-color-private-brand-700-solid: rgb(152 178 217);
+  --g-color-private-brand-650-solid: rgb(137 167 212);
+  --g-color-private-brand-600-solid: rgb(123 156 206);
+  --g-color-private-brand-500-solid: rgb(101 133 184);
+  --g-color-private-brand-450-solid: rgb(93 122 168);
+  --g-color-private-brand-400-solid: rgb(86 110 151);
+  --g-color-private-brand-350-solid: rgb(78 99 134);
+  --g-color-private-brand-300-solid: rgb(71 87 118);
+  --g-color-private-brand-250-solid: rgb(64 75 101);
+  --g-color-private-brand-200-solid: rgb(56 64 84);
+  --g-color-private-brand-150-solid: rgb(49 52 67);
+  --g-color-private-brand-100-solid: rgb(45 46 59);
+  --g-color-private-brand-50-solid: rgb(41 41 51);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-soft: var(--primary-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: var(--font-maple-mono);
+  --font-mono: var(--font-maple-mono);
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-maple-mono), "Microsoft YaHei", monospace;
+  font-variant-ligatures: common-ligatures contextual;
+  font-feature-settings:
+    "liga" 1,
+    "calt" 1,
+    "cv01" 1;
+}
+
+.app-background-pattern {
+  width: 100%;
+  height: 100%;
+  --pattern-color: var(--g-color-private-brand-150-solid);
+  background-color: var(--background);
+  background-image:
+    linear-gradient(
+      0deg,
+      transparent 22%,
+      var(--pattern-color) 24%,
+      var(--pattern-color) 28%,
+      transparent 30%,
+      transparent 70%,
+      var(--pattern-color) 72%,
+      var(--pattern-color) 76%,
+      transparent 78%,
+      transparent
+    ),
+    linear-gradient(
+      90deg,
+      transparent 22%,
+      var(--pattern-color) 24%,
+      var(--pattern-color) 28%,
+      transparent 30%,
+      transparent 70%,
+      var(--pattern-color) 72%,
+      var(--pattern-color) 76%,
+      transparent 78%,
+      transparent
+    );
+  background-size: 24px 24px;
+}
+
+.app-sidebar {
+  display: flex;
+  width: 192px;
+  flex: 0 0 192px;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: #fff;
+  font-family: var(--font-mi-sans), "Microsoft YaHei", sans-serif;
+  transition:
+    width 180ms ease,
+    flex-basis 180ms ease;
+}
+
+.app-sidebar[data-collapsed="true"] {
+  width: 64px;
+  flex-basis: 64px;
+}
+
+.app-sidebar[data-collapsed="true"] .sidebar-label {
+  display: none;
+}
+
+.sidebar-nav-button {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 39px;
+  align-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 0px;
+  background-color: transparent;
+  color: #000;
+  font-family: var(--font-mi-sans), "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  text-decoration: none;
+  box-shadow: none;
+  outline: none;
+  overflow: hidden;
+  cursor: pointer;
+  transition: none;
+}
+
+.sidebar-button-wrap {
+  position: relative;
+  display: flex;
+  width: calc(100% - 6px);
+  height: 39px;
+  margin-inline: 3px;
+  align-items: center;
+}
+
+.sidebar-button-group {
+  display: grid;
+  gap: 0;
+}
+
+.sidebar-nav-button[data-active="true"] {
+  position: relative;
+  z-index: 4;
+  height: 43px;
+  margin-block: 0;
+  display: flex;
+  background-color: #0a66c2;
+  color: #ffffff;
+  padding: 0.5rem 1.4rem;
+  font-size: 0.775rem;
+  line-height: 1.25rem;
+  font-weight: 400;
+  text-align: center;
+  vertical-align: middle;
+  align-items: center;
+  border-radius: 0.5rem;
+  gap: 0.75rem;
+  border: 0px;
+  cursor: pointer;
+  box-shadow:
+    0 4px 6px -1px rgb(0 0 0 / 10%),
+    0 2px 4px -1px rgb(0 0 0 / 6%);
+}
+
+.sidebar-button-content {
+  position: absolute;
+  left: 0;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding-inline: 1.15em;
+  transform: translateY(-50%);
+  transition: top 500ms;
+}
+
+.sidebar-button-content-one {
+  top: 50%;
+}
+
+.sidebar-button-content-two {
+  top: 150%;
+}
+
+.sidebar-nav-button:hover .sidebar-button-content-one {
+  top: -100%;
+}
+
+.sidebar-nav-button:hover .sidebar-button-content-two {
+  top: 50%;
+}
+
+.sidebar-button-separator {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: calc(100% - 50px);
+  height: 2px;
+  margin-inline: auto;
+  background: #e5e7eb;
+}
+
+.sidebar-button-wrap[data-active="true"] {
+  z-index: 4;
+}
+
+.sidebar-button-wrap[data-active="true"]::before,
+.sidebar-button-wrap[data-active="true"]::after {
+  position: absolute;
+  right: 10px;
+  left: 10px;
+  height: 2px;
+  z-index: 5;
+  background: #0a66c2;
+  content: "";
+}
+
+.sidebar-button-wrap[data-active="true"]::before {
+  top: -2px;
+}
+
+.sidebar-button-wrap[data-active="true"]::after {
+  bottom: -2px;
+}
+
+.sidebar-nav-button:not([data-active="true"]):hover {
+  color: #23c483;
+}
+
+.sidebar-nav-button:focus-visible {
+  outline: 2px solid rgb(35 196 131 / 40%);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+.app-sidebar[data-collapsed="true"] .sidebar-nav-button {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.app-sidebar[data-collapsed="true"] .sidebar-button-content {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.app-sidebar:not([data-collapsed="true"]) .sidebar-button-content > svg {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .app-sidebar {
+    width: 64px;
+    flex-basis: 64px;
+  }
+
+  .app-sidebar .sidebar-label {
+    display: none;
+  }
+
+  .app-sidebar .sidebar-nav-button {
+    justify-content: center;
+    padding-inline: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-nav-button {
+    transition: none;
+  }
+}
+
+::selection {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+/* Toast regions are mounted as direct body children. The app shell's global
+   body-child sizing must not clip their shadow or change the visible shape. */
+.toast-region {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.toast {
+  border-radius: 1rem;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 12%);
+}
