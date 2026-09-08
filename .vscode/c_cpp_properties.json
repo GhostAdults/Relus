@@ -3,10 +3,7 @@
         {
             "name": "Win32",
             "includePath": [
-                "${workspaceFolder}/**",
-                "${workspaceFolder}/my_app/windows/runner",
-                "${workspaceFolder}/my_app/windows/flutter/ephemeral",
-                "${workspaceFolder}/my_app/windows/flutter/ephemeral/cpp_client_wrapper/include"
+                "${workspaceFolder}/**"
             ],
             "defines": [
                 "_DEBUG",

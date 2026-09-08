@@ -4,7 +4,7 @@ pub mod rdbms_writer_util;
 pub use database_writer::{DatabaseJob, DatabaseWriter};
 pub use rdbms_writer_util::rdbms_writer::{RdbmsConfig, RdbmsJob, RdbmsWriter, RowWriter};
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use relus_common::job_config::{JobConfig, WriteMode};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -57,7 +57,7 @@ impl<T: DataWriterJob + DataWriterTask> DataWriter for T {}
 // Writer 全局注册表
 // ==========================================
 
-type WriterCreator = fn(Arc<JobConfig>) -> Result<Box<dyn DataWriter>>;
+type WriterCreator = fn(Arc<JobConfig>) -> Result<Arc<dyn DataWriter>>;
 
 /// Writer 插件
 pub struct WriterPlugin {
@@ -75,31 +75,36 @@ pub struct WriterRegistry {
 impl WriterRegistry {
     pub fn instance() -> &'static Self {
         static INSTANCE: OnceLock<WriterRegistry> = OnceLock::new();
-        INSTANCE.get_or_init(|| WriterRegistry {
-            creators: RwLock::new(HashMap::new()),
+        INSTANCE.get_or_init(|| {
+            let registry = WriterRegistry {
+                creators: RwLock::new(HashMap::new()),
+            };
+            registry.collect_plugins();
+            registry
         })
     }
 
-    pub fn collect_and_register() {
-        let registry = Self::instance();
-        for plugin in inventory::iter::<WriterPlugin> {
-            let Ok(mut creators) = registry.creators.write() else {
-                eprintln!(
-                    "Writer registry is unavailable; skipped registration for '{}'",
-                    plugin.source_type
-                );
-                continue;
-            };
+    fn collect_plugins(&self) {
+        let Ok(mut creators) = self.creators.write() else {
+            eprintln!("Writer registry is unavailable; skipped plugin collection");
+            return;
+        };
 
+        for plugin in inventory::iter::<WriterPlugin> {
             creators.insert(plugin.source_type.to_string(), plugin.create);
         }
+    }
+
+    /// 兼容旧调用方；首次调用时会触发注册表懒加载，之后不会重复收集。
+    pub fn collect_and_register() {
+        let _ = Self::instance();
     }
 
     pub fn prepare_writer(
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Box<dyn DataWriter>> {
+    ) -> Result<Arc<dyn DataWriter>,Error> {
         let creators = self
             .creators
             .read()
@@ -133,7 +138,7 @@ inventory::submit! {
         source_type: "database",
         create: |config| {
             let writer = DatabaseWriter::init(config)?;
-            Ok(Box::new(writer))
+            Ok(Arc::new(writer))
         },
     }
 }

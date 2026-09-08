@@ -10,7 +10,7 @@ pub use rdbms_reader_util::rdbms_reader::{
     count_total_records, execute_query_stream, DbRowStream, RdbmsConfig, RdbmsReader,
 };
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use futures::stream::Stream;
 use relus_common::job_config::JobConfig;
 use serde_json::Value as JsonValue;
@@ -76,7 +76,7 @@ impl<T: DataReaderJob + DataReaderTask> DataReader for T {}
 // ==========================================
 
 /// Reader 创建函数类型
-type ReaderCreator = fn(Arc<JobConfig>) -> Result<Box<dyn DataReader>>;
+type ReaderCreator = fn(Arc<JobConfig>) -> Result<Arc<dyn DataReader>>;
 
 /// Reader 插件（由各 reader 实现通过 inventory::submit! 注册）
 pub struct ReaderPlugin {
@@ -94,32 +94,40 @@ pub struct ReaderRegistry {
 impl ReaderRegistry {
     pub fn instance() -> &'static Self {
         static INSTANCE: OnceLock<ReaderRegistry> = OnceLock::new();
-        INSTANCE.get_or_init(|| ReaderRegistry {
-            creators: RwLock::new(HashMap::new()),
+        INSTANCE.get_or_init(|| {
+            let registry = ReaderRegistry {
+                creators: RwLock::new(HashMap::new()),
+            };
+            registry.collect_plugins();
+            registry
         })
     }
 
-    /// 从 inventory 收集所有已链接的 Reader 插件并注册
-    pub fn collect_and_register() {
-        let registry = Self::instance();
-        for plugin in inventory::iter::<ReaderPlugin> {
-            let Ok(mut creators) = registry.creators.write() else {
-                eprintln!(
-                    "Reader registry is unavailable; skipped registration for '{}'",
-                    plugin.source_type
-                );
-                continue;
-            };
+    /// 从 inventory 收集所有已链接的 Reader 插件并注册到当前实例。
+    ///
+    /// 此方法只能在 `instance()` 创建实例后调用，不能在这里再次调用
+    /// `instance()`，否则会导致 OnceLock 初始化递归。
+    fn collect_plugins(&self) {
+        let Ok(mut creators) = self.creators.write() else {
+            eprintln!("Reader registry is unavailable; skipped plugin collection");
+            return;
+        };
 
+        for plugin in inventory::iter::<ReaderPlugin> {
             creators.insert(plugin.source_type.to_string(), plugin.create);
         }
+    }
+
+    /// 兼容旧调用方；首次调用时会触发注册表懒加载，之后不会重复收集。
+    pub fn collect_and_register() {
+        let _ = Self::instance();
     }
 
     pub fn prepare_reader(
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Box<dyn DataReader>> {
+    ) -> Result<Arc<dyn DataReader>,Error> {
         let creators = self
             .creators
             .read()
@@ -153,7 +161,7 @@ inventory::submit! {
         source_type: "api",
         create: |config| {
             let reader = ApiReader::init(config)?;
-            Ok(Box::new(reader))
+            Ok(Arc::new(reader))
         },
     }
 }
@@ -163,7 +171,7 @@ inventory::submit! {
         source_type: "database",
         create: |config| {
             let reader = DatabaseReader::init(config)?;
-            Ok(Box::new(reader))
+            Ok(Arc::new(reader))
         },
     }
 }
@@ -173,7 +181,7 @@ inventory::submit! {
         source_type: "mysql_binlog",
         create: |config| {
             let reader = BinlogReader::init(config)?;
-            Ok(Box::new(reader))
+            Ok(Arc::new(reader))
         },
     }
 }

@@ -14,7 +14,7 @@ import { SelectField } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { toast } from "@/components/ui/toast-provider";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { Surface, Table, Tabs } from "@heroui/react";
+import { ComboBox, ListBox, Surface, Table, Tabs } from "@heroui/react";
 import { ChipWithIcon } from "@/components/ui/chip-with-icon";
 import { JsonPreview } from "@/components/ui/json-preview";
 import { CircleFill, Xmark, CircleCheckFill, Check } from "@gravity-ui/icons";
@@ -498,9 +498,20 @@ type ConnectionSectionProps = {
 function ConnectionSection({ title, prefix, form, updateForm, sourceTypes }: ConnectionSectionProps) {
   // 连接状态
   const [connectionState, setConnectionState] = useState<"idle" | "success" | "error">("idle");
+  const [tables, setTables] = useState<string[]>([]);
+  const [tableInput, setTableInput] = useState("");
 
   const field = (suffix: "Type" | "Host" | "Port" | "Database" | "Table" | "Username" | "Password") =>
     `${prefix}${suffix}` as keyof FormState;
+
+  const updateConnectionField = (suffix: Parameters<typeof field>[0], value: string) => {
+    updateForm(field(suffix), value);
+    if (suffix !== "Table") {
+      setConnectionState("idle");
+      setTables([]);
+      setTableInput("");
+    }
+  };
 
   return (
     <section className="grid gap-4 rounded-xl border border-border bg-surface-muted/50 p-4">
@@ -514,7 +525,7 @@ function ConnectionSection({ title, prefix, form, updateForm, sourceTypes }: Con
               options={sourceTypes}
               value={form[field("Type")]}
               variant="secondary"
-              onChange={(value) => updateForm(field("Type"), value)}
+              onChange={(value) => updateConnectionField("Type", value)}
             />
           </FormField>
           <div className="flex h-10 items-bottom justify-start">
@@ -534,8 +545,15 @@ function ConnectionSection({ title, prefix, form, updateForm, sourceTypes }: Con
                 try {
                   const dbUrl = `${form[field("Type")]}://${form[field("Username")]}:${form[field("Password")]}@${form[field("Host")]}:${form[field("Port")]}/${form[field("Database")]}`;
                   await invoke("connect_database", { dbUrl, dbType: form[field("Type")] });
+                  const availableTables = await invoke<string[]>("list_database_tables");
+                  setTables(availableTables);
+                  setTableInput(form[field("Table")]);
                   setConnectionState("success");
+                  console.log("connected");
                 } catch {
+                  console.log("connect error");
+                  setTables([]);
+                  setTableInput("");
                   setConnectionState("error");
                 }
               }}
@@ -548,14 +566,14 @@ function ConnectionSection({ title, prefix, form, updateForm, sourceTypes }: Con
           <Input
             value={form[field("Host")]}
             placeholder="主机IP地址"
-            onChange={(event) => updateForm(field("Host"), event.target.value)}
+            onChange={(event) => updateConnectionField("Host", event.target.value)}
           />
         </FormField>
         <FormField label="端口">
           <Input
             value={form[field("Port")]}
             placeholder="端口号"
-            onChange={(event) => updateForm(field("Port"), event.target.value)}
+            onChange={(event) => updateConnectionField("Port", event.target.value)}
           />
         </FormField>
       </div>
@@ -563,25 +581,57 @@ function ConnectionSection({ title, prefix, form, updateForm, sourceTypes }: Con
         <FormField label="数据库">
           <Input
             value={form[field("Database")]}
-            onChange={(event) => updateForm(field("Database"), event.target.value)}
+            onChange={(event) => updateConnectionField("Database", event.target.value)}
           />
         </FormField>
         <FormField label="数据表">
-          <Input value={form[field("Table")]} onChange={(event) => updateForm(field("Table"), event.target.value)} />
+          <ComboBox
+            className="w-full"
+            aria-label="选择数据表"
+            selectedKey={form[field("Table")] || null}
+            inputValue={tableInput}
+            onInputChange={(value) => {
+              setTableInput(value);
+              updateForm(field("Table"), value);
+            }}
+            onSelectionChange={(key) => {
+              const value = key == null ? "" : String(key);
+              setTableInput(value);
+              updateForm(field("Table"), value);
+            }}
+          >
+            <ComboBox.InputGroup className="w-full">
+              <Input
+                className="!w-full !min-w-0 !pe-9"
+                placeholder={connectionState === "success" ? "选择或搜索数据表" : "请先连接"}
+              />
+              <ComboBox.Trigger />
+            </ComboBox.InputGroup>
+            <ComboBox.Popover>
+              <ListBox>
+                {tables.map((table) => (
+                  <ListBox.Item key={table} id={table} textValue={table}>
+                    {table}
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </ComboBox.Popover>
+          </ComboBox>
         </FormField>
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
         <FormField label="用户名">
           <Input
             value={form[field("Username")]}
-            onChange={(event) => updateForm(field("Username"), event.target.value)}
+            onChange={(event) => updateConnectionField("Username", event.target.value)}
           />
         </FormField>
         <FormField label="密码">
           <Input
             type="password"
             value={form[field("Password")]}
-            onChange={(event) => updateForm(field("Password"), event.target.value)}
+            onChange={(event) => updateConnectionField("Password", event.target.value)}
             placeholder="输入数据库密码"
           />
         </FormField>

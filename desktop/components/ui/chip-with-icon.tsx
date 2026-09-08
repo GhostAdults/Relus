@@ -21,7 +21,8 @@ export function ChipWithIcon({
       <Chip.Label>
         <Link
           href="#"
-          onPress={() => {
+          onClick={(event) => {
+            event.preventDefault();
             onClick?.();
           }}
         >

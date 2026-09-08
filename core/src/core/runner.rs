@@ -129,12 +129,12 @@ impl RunnerStats {
 }
 
 // ==========================================
-// TaskRunner trait
+// TaskExecutor trait
 // ==========================================
 
 /// Runner 策略 trait — Batch 和 Stream 的生命周期编排接口
 #[async_trait::async_trait]
-pub trait TaskRunner: Send + Sync {
+pub trait TaskExecutor: Send + Sync {
     async fn run(
         &self,
         reader: Arc<dyn DataReader>,
@@ -160,7 +160,7 @@ impl BatchRunner {
 }
 
 #[async_trait::async_trait]
-impl TaskRunner for BatchRunner {
+impl TaskExecutor for BatchRunner {
     async fn run(
         &self,
         reader: Arc<dyn DataReader>,
@@ -211,7 +211,7 @@ impl StreamRunner {
 }
 
 #[async_trait::async_trait]
-impl TaskRunner for StreamRunner {
+impl TaskExecutor for StreamRunner {
     async fn run(
         &self,
         reader: Arc<dyn DataReader>,
@@ -275,8 +275,8 @@ impl TaskRunner for StreamRunner {
 // 分发入口
 // ==========================================
 
-/// 根据 StreamMode 选择对应的 TaskRunner 策略。
-fn dispatch_runner(stream_mode: StreamMode, config: RunnerConfig) -> Box<dyn TaskRunner> {
+/// 根据 StreamMode 选择对应的 TaskExecutor 策略。
+fn dispatch_runner(stream_mode: StreamMode, config: RunnerConfig) -> Box<dyn TaskExecutor> {
     match stream_mode {
         StreamMode::Batch => Box::new(BatchRunner::new(config)),
         StreamMode::Streaming => Box::new(StreamRunner::new(config)),
@@ -291,15 +291,10 @@ pub async fn start_task(
     config: Arc<JobConfig>,
     cancel_token: CancellationToken,
 ) -> Result<RunResult> {
-    super::registry::ensure_initialized();
-
-    let reader_registry = ReaderRegistry::instance();
-    let writer_registry = WriterRegistry::instance();
-
-    let reader: Arc<dyn DataReader> =
-        Arc::from(reader_registry.prepare_reader(&config.source.source_type, Arc::clone(&config))?);
-    let writer: Arc<dyn DataWriter> =
-        Arc::from(writer_registry.prepare_writer(&config.target.source_type, Arc::clone(&config))?);
+    let reader =
+        ReaderRegistry::instance().prepare_reader(&config.source.source_type, Arc::clone(&config))?;
+    let writer =
+        WriterRegistry::instance().prepare_writer(&config.target.source_type, Arc::clone(&config))?;
 
     // 先 split 获取 StreamMode，用于选择策略
     let runner_config = RunnerConfig::from_job_config(&config);
@@ -316,6 +311,6 @@ pub async fn start_task(
         split_result.total_records
     );
 
-    let runner = dispatch_runner(stream_mode, runner_config);
-    runner.run(reader, writer, config, cancel_token).await
+    let executor = dispatch_runner(stream_mode, runner_config);
+    executor.run(reader, writer, config, cancel_token).await
 }
