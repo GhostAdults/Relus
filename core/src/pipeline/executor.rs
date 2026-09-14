@@ -1,10 +1,10 @@
 //! Pipeline Executor 模块
 //!
-//! Reader → Channel → Writer 1:1
+//! Reader → RecordBuilder → Channel → Writer execution for prepared groups.
 //!
-//! - 一个 Job 被 Reader split 为 N 个 ReadTask
-//! - Writer 以相同数量 N split，形成 N 个 1:1 Pair
-//! - 通过 TaskGroup + TaskExecutor 控制并发
+//! Physical splitting, writer allocation, pairing, and group concurrency are
+//! completed before this module is called. The executor only consumes those
+//! prepared pairs and reports execution outcomes.
 //!
 //! Core 层负责 stream 消费、buffer 切分、RecordBuilder mapping 和 channel 发送
 
@@ -17,7 +17,6 @@ use relus_common::constant::pipeline::{
     DEFAULT_READER_THREADS,
 };
 use relus_common::pipeline::PipelineMessage;
-use relus_common::types::SourceType;
 use relus_reader::{DataReader, ReadTask};
 use relus_writer::{DataWriter, WriteTask};
 use serde::{Deserialize, Serialize};
@@ -28,7 +27,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use super::progress::create_progress_bars;
+use crate::core::engine::task_execution::{TaskLifecycleObserver, TaskOutcome};
+use crate::core::progress::create_progress_bars;
 use crate::pipeline::RecordBuilder;
 
 // ==========================================
@@ -54,6 +54,7 @@ struct PipelineProgress {
 
 struct PairWork {
     pair_id: usize,
+    lifecycle_id: usize,
     read_task: ReadTask,
     write_task: WriteTask,
 }
@@ -62,10 +63,12 @@ struct GroupWork {
     group_id: usize,
     tasks: Vec<PairWork>,
     concurrency: usize,
+    observer: Option<Arc<dyn TaskLifecycleObserver>>,
 }
 
 struct PairResult {
     pair_id: usize,
+    lifecycle_id: usize,
     read_count: usize,
     write_count: usize,
     error: Option<anyhow::Error>,
@@ -73,11 +76,91 @@ struct PairResult {
 }
 
 struct GroupResult {
-    group_id: usize,
     total_read: usize,
     total_written: usize,
     error: Option<anyhow::Error>,
     shutdown: bool,
+}
+
+pub struct PreparedPipelineTask {
+    pub read_task: ReadTask,
+    pub write_task: WriteTask,
+}
+pub struct PreparedTaskGroup {
+    pub group_id: usize,
+    pub tasks: Vec<PreparedPipelineTask>,
+    pub concurrency: usize,
+}
+pub struct PreparedGroupStats {
+    pub total_read: usize,
+    pub total_written: usize,
+    pub shutdown: bool,
+    pub error: Option<String>,
+    pub elapsed: std::time::Duration,
+}
+
+pub async fn run_prepared_task_group(
+    prepared: PreparedTaskGroup,
+    reader: Arc<dyn DataReader>,
+    writer: Arc<dyn DataWriter>,
+    config: PipelineConfig,
+    record_builder: Arc<RecordBuilder>,
+    cancel_token: CancellationToken,
+    observer: Arc<dyn TaskLifecycleObserver>,
+) -> Result<PreparedGroupStats> {
+    let started = Instant::now();
+    if prepared.tasks.is_empty() {
+        return Ok(PreparedGroupStats {
+            total_read: 0,
+            total_written: 0,
+            shutdown: false,
+            error: None,
+            elapsed: started.elapsed(),
+        });
+    }
+    let total = prepared.tasks.iter().map(|task| task.read_task.limit).sum();
+    let progress_ctx = create_progress_bars(total)?;
+    let tasks = prepared
+        .tasks
+        .into_iter()
+        .enumerate()
+        .map(|(index, task)| PairWork {
+            pair_id: index,
+            lifecycle_id: index,
+            read_task: task.read_task,
+            write_task: task.write_task,
+        })
+        .collect();
+    let ctx = PipelineRunContext {
+        reader,
+        writer,
+        buffer_size: config.buffer_size,
+        batch_size: config.batch_size,
+        record_builder,
+        cancel_token: cancel_token.clone(),
+        progress: PipelineProgress {
+            reader_bar: progress_ctx.reader_bar.clone(),
+            writer_bar: progress_ctx.writer_bar.clone(),
+        },
+    };
+    let result = run_task_group(
+        GroupWork {
+            group_id: prepared.group_id,
+            tasks,
+            concurrency: prepared.concurrency,
+            observer: Some(observer),
+        },
+        ctx,
+    )
+    .await;
+    progress_ctx.finish()?;
+    Ok(PreparedGroupStats {
+        total_read: result.total_read,
+        total_written: result.total_written,
+        shutdown: result.shutdown,
+        error: result.error.map(|e| e.to_string()),
+        elapsed: started.elapsed(),
+    })
 }
 
 /// 管道配置
@@ -111,6 +194,27 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.reader_threads > 0,
+            "reader_threads must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.buffer_size > 0,
+            "buffer_size must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.channel_number > 0,
+            "channel_number must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.per_group_channel > 0,
+            "per_group_channel must be greater than zero"
+        );
+        anyhow::ensure!(self.batch_size > 0, "batch_size must be greater than zero");
+        Ok(())
+    }
+
     /// 从系统配置读取 pipeline 参数
     ///
     /// 优先级：系统配置 (default.config.json) > 常量默认值
@@ -120,21 +224,12 @@ impl PipelineConfig {
                 .map(|mgr| {
                     let m = mgr.read();
                     (
-                        m.get("pipeline.reader_threads")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as usize),
-                        m.get("pipeline.buffer_size")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as usize),
-                        m.get("pipeline.channel_number")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as usize),
+                        m.get("pipeline.reader_threads").and_then(as_positive_usize),
+                        m.get("pipeline.buffer_size").and_then(as_positive_usize),
+                        m.get("pipeline.channel_number").and_then(as_positive_usize),
                         m.get("pipeline.per_group_channel")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as usize),
-                        m.get("pipeline.batch_size")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as usize),
+                            .and_then(as_positive_usize),
+                        m.get("pipeline.batch_size").and_then(as_positive_usize),
                         m.get("pipeline.use_transaction").and_then(|v| v.as_bool()),
                     )
                 })
@@ -142,7 +237,10 @@ impl PipelineConfig {
 
         Self {
             reader_threads: sys_reader.unwrap_or(DEFAULT_READER_THREADS),
-            buffer_size: sys_buffer.unwrap_or(DEFAULT_BUFFER_SIZE),
+            buffer_size: job_config
+                .channel_buffer_size
+                .or(sys_buffer)
+                .unwrap_or(DEFAULT_BUFFER_SIZE),
             channel_number: sys_channel.unwrap_or(DEFAULT_CHANNEL_NUMBER),
             per_group_channel: sys_per_group.unwrap_or(DEFAULT_PER_GROUP_CHANNEL),
             batch_size: job_config
@@ -152,6 +250,13 @@ impl PipelineConfig {
             use_transaction: sys_tx.unwrap_or(true),
         }
     }
+}
+
+fn as_positive_usize(value: &relus_common::app_config::value::ConfigValue) -> Option<usize> {
+    value
+        .as_i64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
 }
 
 /// 管道执行统计
@@ -175,31 +280,6 @@ impl PipelineStats {
     pub fn records_failed(&self) -> usize {
         self.records_read.saturating_sub(self.records_written)
     }
-}
-
-/// Pipeline 的执行逻辑：Reader → Writer 1:1
-pub async fn start_run(
-    config: PipelineConfig,
-    reader: Arc<dyn DataReader>,
-    writer: Arc<dyn DataWriter>,
-    job_config: Arc<relus_common::JobConfig>,
-    cancel_token: CancellationToken,
-) -> Result<PipelineStats> {
-    // 从 JobConfig 构建 RecordBuilder
-    let source_type = job_config
-        .source
-        .source_type
-        .parse::<SourceType>()
-        .unwrap_or_else(|err| match err {});
-    let record_builder = Arc::new(
-        RecordBuilder::new(
-            job_config.column_mapping.clone(),
-            job_config.column_types.clone(),
-        )?
-        .with_source_type(source_type),
-    );
-
-    run_paired_pipeline(&config, reader, writer, record_builder, cancel_token).await
 }
 
 /// 从 Reader 获取 JsonStream，消费并通过 RecordBuilder mapping 后发送到 channel
@@ -249,14 +329,19 @@ async fn csas(
     Ok(sent)
 }
 
-async fn run_task_pair(pair: PairWork, ctx: PipelineRunContext) -> PairResult {
+async fn run_task_pair(
+    pair: PairWork,
+    ctx: PipelineRunContext,
+    observer: Option<Arc<dyn TaskLifecycleObserver>>,
+) -> PairResult {
     let PairWork {
         pair_id,
+        lifecycle_id,
         read_task,
         write_task,
     } = pair;
 
-    let (tx, rx) = mpsc::channel(ctx.buffer_size);
+    let (tx, rx) = crate::core::engine::channel::Channel::new(ctx.buffer_size).pair();
     let was_cancelled = ctx.cancel_token.is_cancelled();
 
     let r = Arc::clone(&ctx.reader);
@@ -289,7 +374,7 @@ async fn run_task_pair(pair: PairWork, ctx: PipelineRunContext) -> PairResult {
     });
 
     // 中间转发 task: rx → writer_bar.inc → tx2，Writer 拿 rx2
-    let (tx2, rx2) = mpsc::channel(ctx.buffer_size);
+    let (tx2, rx2) = crate::core::engine::channel::Channel::new(ctx.buffer_size).pair();
     let w_bar = ctx.progress.writer_bar.clone();
     let relay_handle = tokio::spawn(async move {
         let mut rx = rx;
@@ -320,6 +405,10 @@ async fn run_task_pair(pair: PairWork, ctx: PipelineRunContext) -> PairResult {
         }
     });
 
+    if let Some(ref observer) = observer {
+        observer.deployed(lifecycle_id).await;
+    }
+
     // 确保 relay task 不泄漏
     let _ = relay_handle.await;
 
@@ -347,10 +436,11 @@ async fn run_task_pair(pair: PairWork, ctx: PipelineRunContext) -> PairResult {
 
     PairResult {
         pair_id,
+        lifecycle_id,
         read_count,
         write_count,
         error,
-        shutdown: was_cancelled,
+        shutdown: was_cancelled || ctx.cancel_token.is_cancelled(),
     }
 }
 
@@ -359,6 +449,7 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
         group_id,
         tasks,
         concurrency,
+        observer,
     } = group;
     let mut queue: VecDeque<PairWork> = VecDeque::from(tasks);
     let mut running = FuturesUnordered::new();
@@ -370,7 +461,7 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
 
     while running.len() < concurrency {
         if let Some(pair) = queue.pop_front() {
-            running.push(run_task_pair(pair, ctx.clone()));
+            running.push(run_task_pair(pair, ctx.clone(), observer.clone()));
         } else {
             break;
         }
@@ -381,6 +472,9 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
             group_shutdown = true;
         }
 
+        let pair_failed = pair_result.error.is_some();
+        let pair_shutdown = pair_result.shutdown;
+        let lifecycle_id = pair_result.lifecycle_id;
         if let Some(e) = pair_result.error {
             error!(
                 "TaskGroup-{} 的 Pair-{} 失败: {}",
@@ -399,10 +493,25 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
             );
         }
 
+        if let Some(ref observer) = observer {
+            observer
+                .completed(
+                    lifecycle_id,
+                    if pair_shutdown {
+                        TaskOutcome::Cancelled
+                    } else if pair_failed {
+                        TaskOutcome::Failed
+                    } else {
+                        TaskOutcome::Succeeded
+                    },
+                )
+                .await;
+        }
+
         if first_error.is_none() {
             while running.len() < concurrency {
                 if let Some(pair) = queue.pop_front() {
-                    running.push(run_task_pair(pair, ctx.clone()));
+                    running.push(run_task_pair(pair, ctx.clone(), observer.clone()));
                 } else {
                     break;
                 }
@@ -411,164 +520,9 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
     }
 
     GroupResult {
-        group_id,
         total_read,
         total_written,
         error: first_error,
         shutdown: group_shutdown,
     }
-}
-
-/// 1:1 Pair
-async fn run_paired_pipeline(
-    config: &PipelineConfig,
-    reader: Arc<dyn DataReader>,
-    writer: Arc<dyn DataWriter>,
-    record_builder: Arc<RecordBuilder>,
-    cancel_token: CancellationToken,
-) -> Result<PipelineStats> {
-    let start_time = Instant::now();
-
-    let reader_split = reader.split(config.reader_threads).await?;
-    let task_count = reader_split.tasks.len();
-    info!(
-        "[{}] 总记录数 {}, 切分为 {} 个任务",
-        reader.description(),
-        reader_split.total_records,
-        task_count
-    );
-    if task_count == 0 {
-        info!("[{}] 无读取任务，Pipeline 关闭", reader.description());
-        return Ok(PipelineStats::default());
-    }
-
-    let progress_ctx = create_progress_bars(reader_split.total_records)?;
-    let writer_split = writer.split(task_count).await?;
-    info!(
-        "[{}] 切分为 {} 个任务（R1:W1）",
-        writer.description(),
-        writer_split.tasks.len()
-    );
-
-    if writer_split.tasks.len() < task_count {
-        return Err(anyhow::anyhow!(
-            "Writer 只产出 {} 个任务，但有 {} 个 Reader 任务.",
-            writer_split.tasks.len(),
-            task_count
-        ));
-    }
-
-    let need_channel = config.channel_number.max(1).min(task_count);
-    let per_group_channel = config.per_group_channel.max(1);
-    let group_count = need_channel.div_ceil(per_group_channel);
-
-    let mut grouped_tasks: Vec<Vec<PairWork>> = (0..group_count).map(|_| Vec::new()).collect();
-    for i in 0..task_count {
-        let group_id = i % group_count;
-        grouped_tasks[group_id].push(PairWork {
-            pair_id: i,
-            read_task: reader_split.tasks[i].clone(),
-            write_task: writer_split.tasks[i].clone(),
-        });
-    }
-
-    let base_group_concurrency = need_channel / group_count;
-    let extra_group_concurrency = need_channel % group_count;
-
-    info!(
-        "Pipeline 准备配置: task_count={}, need_channel={}, group_count={}, per_group_channel={}",
-        task_count, need_channel, group_count, per_group_channel
-    );
-
-    let mut group_handles = FuturesUnordered::new();
-    let run_ctx = PipelineRunContext {
-        reader: Arc::clone(&reader),
-        writer: Arc::clone(&writer),
-        buffer_size: config.buffer_size,
-        batch_size: config.batch_size,
-        record_builder: Arc::clone(&record_builder),
-        cancel_token: cancel_token.clone(),
-        progress: PipelineProgress {
-            reader_bar: progress_ctx.reader_bar.clone(),
-            writer_bar: progress_ctx.writer_bar.clone(),
-        },
-    };
-
-    for (group_id, tasks) in grouped_tasks.into_iter().enumerate() {
-        if tasks.is_empty() {
-            continue;
-        }
-
-        let group_concurrency =
-            base_group_concurrency + usize::from(group_id < extra_group_concurrency);
-
-        info!(
-            "TaskGroup-{} 启动: tasks={}, concurrency={}",
-            group_id,
-            tasks.len(),
-            group_concurrency
-        );
-
-        let group_future = run_task_group(
-            GroupWork {
-                group_id,
-                tasks,
-                concurrency: group_concurrency,
-            },
-            run_ctx.clone(),
-        );
-
-        group_handles.push(tokio::spawn(group_future));
-    }
-
-    let mut total_read = 0usize;
-    let mut total_written = 0usize;
-    let mut first_error: Option<anyhow::Error> = None;
-    let mut pipeline_shutdown = false;
-
-    while let Some(group_result) = group_handles.next().await {
-        match group_result {
-            Ok(result) => {
-                total_read += result.total_read;
-                total_written += result.total_written;
-                if result.shutdown {
-                    pipeline_shutdown = true;
-                }
-                info!(
-                    "TaskGroup-{} 结束: read={}, write={}",
-                    result.group_id, result.total_read, result.total_written
-                );
-                if let Some(e) = result.error {
-                    if first_error.is_none() && !result.shutdown {
-                        first_error = Some(e);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("TaskGroup 任务崩溃: {}", e);
-                if first_error.is_none() {
-                    first_error = Some(anyhow::anyhow!("TaskGroup 任务崩溃: {}", e));
-                }
-            }
-        }
-    }
-
-    let elapsed = start_time.elapsed();
-    let mut stats = PipelineStats {
-        records_read: total_read,
-        records_written: total_written,
-        elapsed_secs: elapsed.as_secs_f64(),
-        shutdown: pipeline_shutdown,
-        ..Default::default()
-    };
-    stats.records_failed = stats.records_failed();
-    stats.calculate_throughput();
-
-    progress_ctx.finish()?;
-
-    if let Some(e) = first_error {
-        return Err(e);
-    }
-
-    Ok(stats)
 }
