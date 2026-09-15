@@ -10,7 +10,7 @@ use crate::core::engine::contracts::RunStatus;
 use crate::core::scheduler::{
     SchedulerControlHandle, SchedulerError, SchedulerResponse, TaskScheduler,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use parking_lot::RwLock;
 use relus_api::server::{
     ApiFuture, ApiHandlerResult, AppState, SchedulerControl, SharedState, StatusCode, SyncExecutor,
@@ -188,14 +188,6 @@ pub fn init_and_watch_config() {
             Err(e) => eprintln!("Failed to start config watcher: {}", e),
         }
     }
-}
-
-pub fn read_config(path: PathBuf) -> Result<JobConfig> {
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let cfg = JobConfig::parse_json(&data)
-        .with_context(|| format!("配置文件解析失败: {}", path.display()))?;
-    Ok(cfg)
 }
 
 struct CoreSyncExecutor {

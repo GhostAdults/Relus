@@ -1,6 +1,6 @@
 //! Configuration parsing and preparation boundary.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use relus_common::job_config::JobConfig;
 use relus_reader::{DataReader, ReaderRegistry, SplitReaderResult, StreamMode};
 use relus_writer::{DataWriter, WriterRegistry};
@@ -69,13 +69,8 @@ impl Planner {
         config: Arc<JobConfig>,
         dependencies: &dyn PlanningDependencies,
     ) -> Result<ExecutionPlan> {
-        validate_config(&config).context("planning: validate JobConfig")?;
-        let reader = dependencies
-            .create_reader(Arc::clone(&config))
-            .context("planning: create Reader")?;
-        let writer = dependencies
-            .create_writer(Arc::clone(&config))
-            .context("planning: create Writer")?;
+        validate_config(&config)
+            .map_err(|error| anyhow!("planning: validate JobConfig: {error}"))?;
         let record_builder = Arc::new(
             dependencies
                 .build_record_builder(&config)
@@ -85,6 +80,12 @@ impl Planner {
         pipeline
             .validate()
             .context("planning: validate pipeline config")?;
+        let reader = dependencies
+            .create_reader(Arc::clone(&config))
+            .context("planning: create Reader")?;
+        let writer = dependencies
+            .create_writer(Arc::clone(&config))
+            .context("planning: create Writer")?;
         let reader_split = reader
             .split(pipeline.reader_threads)
             .await
@@ -118,6 +119,19 @@ fn validate_config(config: &JobConfig) -> Result<()> {
             buffer_size > 0,
             "channel_buffer_size must be greater than zero"
         );
+    }
+    for data_source in [&config.source, &config.sink] {
+        if data_source.source_type == "database" {
+            let database_config = data_source
+                .parse_database_config()
+                .context("invalid database config")?;
+            relus_connector_rdbms::identifier::validate_database_config(&database_config)?;
+        }
+    }
+    if config.sink.source_type == "database" {
+        for field in config.column_mapping.keys() {
+            relus_connector_rdbms::identifier::validate(field)?;
+        }
     }
     Ok(())
 }
@@ -261,10 +275,56 @@ mod tests {
 
     #[tokio::test]
     async fn record_builder_failure_has_planning_context() {
-        let (mut deps, _, _) = dependencies(StreamMode::Batch);
+        let (mut deps, factory_calls, _) = dependencies(StreamMode::Batch);
         deps.fail_builder = true;
         let config = Arc::new(JobConfig::parse_json(VALID_JOB).unwrap());
         let error = Planner::prepare_with(config, &deps).await.err().unwrap();
         assert!(error.to_string().contains("build RecordBuilder"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_database_config_fails_before_factories() {
+        let (deps, factory_calls, split_count) = dependencies(StreamMode::Batch);
+        let config = Arc::new(
+            JobConfig::parse_json(
+                r#"{
+                    "source": {
+                        "name": "database-source",
+                        "type": "database",
+                        "config": {"connections": [{}]}
+                    },
+                    "sink": {"name": "fake-target", "type": "fake", "config": {}},
+                    "column_mapping": {},
+                    "column_types": null
+                }"#,
+            )
+            .expect("valid JSON structure"),
+        );
+
+        let error = Planner::prepare_with(config, &deps)
+            .await
+            .err()
+            .expect("empty database table must fail planning");
+
+        assert!(error.to_string().contains("table"));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(split_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn non_database_mapping_fields_are_not_sql_identifiers() {
+        let (deps, factory_calls, _) = dependencies(StreamMode::Batch);
+        let mut config = JobConfig::parse_json(VALID_JOB).expect("valid job config");
+        config
+            .column_mapping
+            .insert("profile.name".to_string(), "name".to_string());
+
+        let result = Planner::prepare_with(Arc::new(config), &deps).await;
+
+        if let Err(error) = result {
+            panic!("API fields may contain dots: {error}");
+        }
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
     }
 }

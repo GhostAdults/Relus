@@ -1,6 +1,7 @@
 // cli 命令行参数解析
 
 use crate::core::engine::contracts::{RunResult, RunStatus};
+use crate::core::job_config_loader;
 use crate::core::serve::start_job;
 use crate::init_and_watch_config;
 use crate::run_scheduler;
@@ -11,15 +12,14 @@ use relus_connector_rdbms::connector::{list_tables_mysql, list_tables_postgres};
 use relus_connector_rdbms::pool::{detect_database_kind, get_db_pool, DatabaseKind};
 use relus_reader::rdbms_reader_util::util::client_tool::{extract_by_path, fetch_json};
 
-use anyhow::{bail, Context, Result};
-use regex::Regex;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{MySqlPool, PgPool, Row};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "Relus CLI")]
@@ -98,7 +98,7 @@ pub enum Commands {
 pub async fn run_cli(cmd: Commands) -> Result<()> {
     match cmd {
         Commands::TestApi { config } => {
-            let cfg = read_job_config(&config)?;
+            let cfg = job_config_loader::load(&config)?;
             let api_config = cfg.source.parse_api_config()?;
             let v = fetch_json(&api_config).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -111,8 +111,7 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
         }
         Commands::Sync { config } => {
             init_and_watch_config();
-            let cfg = read_job_config(&config)?;
-            validate_job_identifiers(&cfg)?;
+            let cfg = job_config_loader::load(&config)?;
             let result = start_job(cfg).await?;
             print_run_result(&result);
         }
@@ -137,7 +136,7 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
             db_type,
             table,
         } => {
-            sanitize_identifier(&table)?;
+            relus_connector_rdbms::identifier::validate(&table)?;
             let kind = detect_database_kind(&db_url, db_type)?;
             let cols = match kind {
                 DatabaseKind::Postgres => {
@@ -169,7 +168,7 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
             table,
             output,
         } => {
-            sanitize_identifier(&table)?;
+            relus_connector_rdbms::identifier::validate(&table)?;
             let kind = detect_database_kind(&db_url, db_type)?;
             let cols = match kind {
                 DatabaseKind::Postgres => {
@@ -205,8 +204,7 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
         }
         Commands::SyncWithMapping { config } => {
             init_and_watch_config();
-            let cfg = read_job_config(&config)?;
-            validate_job_identifiers(&cfg)?;
+            let cfg = job_config_loader::load(&config)?;
             let result = start_job(cfg).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -225,50 +223,6 @@ pub async fn run_cli(cmd: Commands) -> Result<()> {
             init_and_watch_config();
             let configs = collect_job_configs(config, jobs_dir)?;
             run_scheduler(configs, !no_repl, host, port).await?;
-        }
-    }
-    Ok(())
-}
-
-fn sanitize_identifier(s: &str) -> Result<()> {
-    let re = Regex::new(r"^[A-Za-z0-9_]+$")?;
-    if !re.is_match(s) {
-        bail!("标识符仅允许字母、数字和下划线: {}", s);
-    }
-    Ok(())
-}
-
-fn read_job_config(path: &PathBuf) -> Result<JobConfig> {
-    let data = fs::read_to_string(path)
-        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let cfg = JobConfig::parse_json(&data)
-        .with_context(|| format!("配置文件解析失败: {}", path.display()))?;
-    Ok(cfg)
-}
-
-fn validate_job_identifiers(cfg: &JobConfig) -> Result<()> {
-    if cfg.source.source_type == "database" {
-        let db_config = cfg.source.parse_database_config()?;
-        validate_database_identifiers(&db_config)?;
-    }
-    if cfg.sink.source_type == "database" {
-        let db_config = cfg.sink.parse_database_config()?;
-        validate_database_identifiers(&db_config)?;
-    }
-    for k in cfg.column_mapping.keys() {
-        sanitize_identifier(k)?;
-    }
-    Ok(())
-}
-
-fn validate_database_identifiers(db_config: &relus_common::DbConfig) -> Result<()> {
-    if db_config.table.is_empty() {
-        bail!("数据库配置必须包含 table 字段");
-    }
-    sanitize_identifier(&db_config.table)?;
-    if let Some(keys) = &db_config.key_columns {
-        for k in keys {
-            sanitize_identifier(k)?;
         }
     }
     Ok(())
@@ -395,9 +349,8 @@ fn collect_job_configs(
     Ok(configs)
 }
 
-fn load_job_config(path: &PathBuf) -> Result<(String, JobConfig)> {
-    let cfg = read_job_config(path)?;
-    validate_job_identifiers(&cfg)?;
+fn load_job_config(path: &Path) -> Result<(String, JobConfig)> {
+    let cfg = job_config_loader::load(path)?;
 
     let job_id = cfg
         .job_id
@@ -410,30 +363,4 @@ fn load_job_config(path: &PathBuf) -> Result<(String, JobConfig)> {
         .ok_or_else(|| anyhow::anyhow!("job_id is required (in config or from filename)"))?;
 
     Ok((job_id, cfg))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn cli_loader_uses_job_config_compatibility_parser() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        write!(
-            file,
-            "{}",
-            serde_json::json!({
-                "input":{"name":"source","type":"api","config":{}},
-                "output":{"name":"sink","type":"api","config":{}},
-                "column_mapping":{},
-                "column_types":null
-            })
-        )
-        .unwrap();
-
-        let config = read_job_config(&file.path().to_path_buf()).unwrap();
-        assert_eq!(config.source.name, "source");
-        assert_eq!(config.sink.name, "sink");
-    }
 }

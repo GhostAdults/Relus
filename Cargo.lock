@@ -4003,7 +4003,6 @@ dependencies = [
  "parking_lot",
  "rand 0.10.2",
  "redb",
- "regex",
  "relus_api",
  "relus_common",
  "relus_connector_rdbms",

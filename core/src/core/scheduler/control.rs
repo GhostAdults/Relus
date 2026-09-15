@@ -1,7 +1,7 @@
 use super::cmd::{Schedule, TaskInfo};
 use relus_common::job_config::JobConfig;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -140,15 +140,21 @@ impl std::fmt::Display for SchedulerError {
 impl std::error::Error for SchedulerError {}
 
 pub fn load_job_config_from_path(
-    path: &PathBuf,
+    path: &Path,
 ) -> Result<(String, Arc<JobConfig>, Schedule), SchedulerError> {
-    let data = std::fs::read_to_string(path).map_err(|e| SchedulerError::InvalidConfig {
-        message: format!("File not found: {} ({})", path.display(), e),
-    })?;
-
-    let config = JobConfig::parse_json(&data).map_err(|e| SchedulerError::InvalidConfig {
-        message: format!("Parse failed: {}", e),
-    })?;
+    let config = match crate::core::job_config_loader::load(path) {
+        Ok(config) => config,
+        Err(crate::core::job_config_loader::JobConfigLoadError::Read { source, .. }) => {
+            return Err(SchedulerError::InvalidConfig {
+                message: format!("File not found: {} ({})", path.display(), source),
+            });
+        }
+        Err(crate::core::job_config_loader::JobConfigLoadError::Parse { source, .. }) => {
+            return Err(SchedulerError::InvalidConfig {
+                message: format!("Parse failed: {}", source),
+            });
+        }
+    };
 
     let job_id = config
         .job_id
