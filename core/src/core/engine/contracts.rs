@@ -2,10 +2,95 @@
 
 use super::state::{Job, JobId, JobState, StateRepository, Task, TaskGroup};
 use parking_lot::RwLock;
+use relus_reader::StreamMode;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+/// Compatibility result returned by synchronous execution entry points.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResult {
+    pub stats: RunnerStats,
+    pub status: RunStatus,
+    pub duration: Duration,
+    pub error: Option<String>,
+}
+
+impl RunResult {
+    pub fn from_engine(
+        result: EngineExecutionResult,
+        stream_mode: StreamMode,
+        shutdown_requested: bool,
+    ) -> Self {
+        let mut stats = RunnerStats {
+            records_read: result.records_read,
+            records_written: result.records_written,
+            records_failed: result.records_failed,
+            elapsed_secs: result.elapsed.as_secs_f64(),
+            throughput: 0.0,
+        };
+        stats.calculate_throughput();
+
+        let shutdown = shutdown_requested
+            || result.cancelled
+            || matches!(result.status, EngineExecutionStatus::Cancelled);
+        let failed = matches!(result.status, EngineExecutionStatus::Failed);
+        let status = if shutdown {
+            RunStatus::Shutdown
+        } else if failed && stats.records_written == 0 {
+            RunStatus::Failed
+        } else if failed || stats.records_failed > 0 {
+            RunStatus::Partial
+        } else if stream_mode == StreamMode::Streaming {
+            RunStatus::Failed
+        } else {
+            RunStatus::Success
+        };
+        let error = if shutdown {
+            None
+        } else if failed {
+            result.error
+        } else if status == RunStatus::Failed {
+            Some("Stream pipeline 非预期退出".to_string())
+        } else {
+            None
+        };
+
+        Self {
+            stats,
+            status,
+            duration: result.elapsed,
+            error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunStatus {
+    Success,
+    Failed,
+    Partial,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunnerStats {
+    pub records_read: usize,
+    pub records_written: usize,
+    pub records_failed: usize,
+    pub elapsed_secs: f64,
+    pub throughput: f64,
+}
+
+impl RunnerStats {
+    pub fn calculate_throughput(&mut self) {
+        if self.elapsed_secs > 0.0 {
+            self.throughput = self.records_written as f64 / self.elapsed_secs;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineExecutionStatus {
@@ -168,6 +253,7 @@ pub(crate) fn test_job_handle(repository: StateRepository) -> (JobHandle, Engine
 #[cfg(test)]
 mod tests {
     use super::*;
+    use relus_reader::StreamMode;
 
     fn result() -> EngineExecutionResult {
         EngineExecutionResult {
@@ -217,5 +303,92 @@ mod tests {
         assert_eq!(snapshot.job.id, handle.id());
         assert!(snapshot.task_groups.is_empty());
         assert_eq!(snapshot.result.unwrap().records_read, 3);
+    }
+
+    fn execution_result(
+        status: EngineExecutionStatus,
+        written: usize,
+        failed: usize,
+        cancelled: bool,
+    ) -> EngineExecutionResult {
+        EngineExecutionResult {
+            status,
+            records_read: written + failed,
+            records_written: written,
+            records_failed: failed,
+            cancelled,
+            elapsed: Duration::from_secs(2),
+            error: (status == EngineExecutionStatus::Failed).then(|| "write failed".into()),
+        }
+    }
+
+    #[test]
+    fn converts_engine_results_to_legacy_statuses() {
+        let success = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
+            StreamMode::Batch,
+            false,
+        );
+        assert_eq!(success.status, RunStatus::Success);
+        assert_eq!(success.stats.throughput, 4.0);
+
+        let partial = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Failed, 8, 2, false),
+            StreamMode::Batch,
+            false,
+        );
+        assert_eq!(partial.status, RunStatus::Partial);
+        assert_eq!(partial.error.as_deref(), Some("write failed"));
+
+        let failed = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Failed, 0, 2, false),
+            StreamMode::Batch,
+            false,
+        );
+        assert_eq!(failed.status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn streaming_completion_and_cancellation_keep_legacy_semantics() {
+        let completed = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Succeeded, 0, 0, false),
+            StreamMode::Streaming,
+            false,
+        );
+        assert_eq!(completed.status, RunStatus::Failed);
+        assert_eq!(
+            completed.error.as_deref(),
+            Some("Stream pipeline 非预期退出")
+        );
+
+        let cancelled = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Cancelled, 3, 0, true),
+            StreamMode::Streaming,
+            false,
+        );
+        assert_eq!(cancelled.status, RunStatus::Shutdown);
+        assert!(cancelled.error.is_none());
+
+        let raced = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Succeeded, 3, 0, false),
+            StreamMode::Streaming,
+            true,
+        );
+        assert_eq!(raced.status, RunStatus::Shutdown);
+        assert!(raced.error.is_none());
+    }
+
+    #[test]
+    fn compatibility_result_json_shape_is_unchanged() {
+        let result = RunResult::from_engine(
+            execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
+            StreamMode::Batch,
+            false,
+        );
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["status"], "Success");
+        assert_eq!(value["stats"]["records_read"], 8);
+        assert!(value.get("duration").is_some());
+        assert!(value.get("error").is_some());
     }
 }

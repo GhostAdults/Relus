@@ -4,17 +4,66 @@ use relus_common::app_config::value::ConfigValue;
 use relus_common::job_config::JobConfig;
 use relus_common::resp::ApiResp;
 use relus_common::{CreateConfigReq, UpdateConfigReq};
+use relus_reader::StreamMode;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
-use crate::core::runner::{start_task, RunResult};
+use crate::core::engine::{
+    contracts::{JobHandle, RunResult},
+    coordinator::CoordinatorService,
+    state::StateRepository,
+};
+use crate::core::planner::{Planner, PlanningDependencies, RegistryPlanningDependencies};
+
+/// Prepares and synchronously waits for one synchronization job.
+pub async fn start_task(
+    config: Arc<JobConfig>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<RunResult> {
+    start_task_with(config, cancel_token, &RegistryPlanningDependencies).await
+}
+
+async fn start_task_with(
+    config: Arc<JobConfig>,
+    cancel_token: CancellationToken,
+    planning: &dyn PlanningDependencies,
+) -> anyhow::Result<RunResult> {
+    let plan = Planner::prepare_with(config, planning).await?;
+    let stream_mode = plan.stream_mode;
+
+    info!(
+        "[start_task] {} 模式, {} 个任务, 总记录数 {}",
+        match stream_mode {
+            StreamMode::Batch => "Batch",
+            StreamMode::Streaming => "Streaming",
+        },
+        plan.reader_split.tasks.len(),
+        plan.reader_split.total_records
+    );
+
+    let coordinator = CoordinatorService::new(StateRepository::new());
+    let handle: JobHandle = coordinator.submit_job(plan)?;
+    let result = tokio::select! {
+        result = handle.wait() => result.map_err(anyhow::Error::msg)?,
+        _ = cancel_token.cancelled() => {
+            handle.cancel();
+            handle.wait().await.map_err(anyhow::Error::msg)?
+        }
+    };
+    Ok(RunResult::from_engine(
+        result,
+        stream_mode,
+        cancel_token.is_cancelled(),
+    ))
+}
 
 /// Starts an immediate task.
 ///
 /// Scheduler callers that need a custom cancellation token should call
-/// `runner::start_task` directly.
+/// [`start_task`] directly.
 pub async fn start_job(cfg: JobConfig) -> anyhow::Result<RunResult> {
     start_task(Arc::new(cfg), CancellationToken::new()).await
 }
@@ -162,5 +211,198 @@ fn merge_json_object(target: &mut Value, updates: &Value) {
                 target_map.insert(key.clone(), value.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use relus_common::{job_config::WriteMode, PipelineMessage};
+    use relus_reader::{
+        DataReader, DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult,
+    };
+    use relus_writer::{DataWriter, DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
+    use tokio::sync::mpsc;
+
+    const JOB: &str = r#"{
+        "source":{"name":"source","type":"fake","config":{}},
+        "target":{"name":"sink","type":"fake","config":{}},
+        "column_mapping":{},"batch_size":1,"channel_buffer_size":1
+    }"#;
+
+    struct FakeReader {
+        mode: StreamMode,
+        pending: bool,
+    }
+
+    #[async_trait]
+    impl DataReaderJob for FakeReader {
+        async fn split(&self, _: usize) -> Result<SplitReaderResult> {
+            Ok(SplitReaderResult {
+                total_records: usize::from(self.pending),
+                tasks: self.pending.then(read_task).into_iter().collect(),
+                stream_mode: self.mode,
+            })
+        }
+
+        fn description(&self) -> String {
+            "bootstrap fake reader".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataReaderTask for FakeReader {
+        async fn read_data(&self, _: &ReadTask) -> Result<JsonStream> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
+
+    struct FakeWriter {
+        config: Arc<JobConfig>,
+        pending: bool,
+    }
+
+    #[async_trait]
+    impl DataWriterJob for FakeWriter {
+        async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+            Ok(SplitWriterResult {
+                tasks: self
+                    .pending
+                    .then(|| WriteTask {
+                        task_id: 0,
+                        config: Arc::clone(&self.config),
+                        mode: WriteMode::Insert,
+                        use_transaction: false,
+                        batch_size: 1,
+                    })
+                    .into_iter()
+                    .collect(),
+            })
+        }
+
+        fn description(&self) -> String {
+            "bootstrap fake writer".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataWriterTask for FakeWriter {
+        async fn write_data(
+            &self,
+            _: WriteTask,
+            mut rx: mpsc::Receiver<PipelineMessage>,
+        ) -> Result<usize> {
+            while rx.recv().await.is_some() {}
+            Ok(0)
+        }
+    }
+
+    struct FakePlanning {
+        mode: StreamMode,
+        pending: bool,
+    }
+
+    impl PlanningDependencies for FakePlanning {
+        fn create_reader(&self, _: Arc<JobConfig>) -> Result<Arc<dyn DataReader>> {
+            Ok(Arc::new(FakeReader {
+                mode: self.mode,
+                pending: self.pending,
+            }))
+        }
+
+        fn create_writer(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataWriter>> {
+            Ok(Arc::new(FakeWriter {
+                config,
+                pending: self.pending,
+            }))
+        }
+
+        fn build_record_builder(
+            &self,
+            config: &JobConfig,
+        ) -> Result<crate::pipeline::RecordBuilder> {
+            crate::pipeline::RecordBuilder::new(
+                config.column_mapping.clone(),
+                config.column_types.clone(),
+            )
+        }
+    }
+
+    fn read_task() -> ReadTask {
+        ReadTask {
+            task_id: 0,
+            conn: serde_json::json!({}),
+            query_sql: None,
+            offset: 0,
+            limit: 1,
+        }
+    }
+
+    fn config() -> Arc<JobConfig> {
+        Arc::new(JobConfig::parse_json(JOB).expect("valid fake job"))
+    }
+
+    #[tokio::test]
+    async fn bootstrap_waits_for_batch_success() {
+        let result = start_task_with(
+            config(),
+            CancellationToken::new(),
+            &FakePlanning {
+                mode: StreamMode::Batch,
+                pending: false,
+            },
+        )
+        .await
+        .expect("batch result");
+        assert_eq!(
+            result.status,
+            crate::core::engine::contracts::RunStatus::Success
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_maps_streaming_natural_exit_to_failed() {
+        let result = start_task_with(
+            config(),
+            CancellationToken::new(),
+            &FakePlanning {
+                mode: StreamMode::Streaming,
+                pending: false,
+            },
+        )
+        .await
+        .expect("stream result");
+        assert_eq!(
+            result.status,
+            crate::core::engine::contracts::RunStatus::Failed
+        );
+        assert_eq!(result.error.as_deref(), Some("Stream pipeline 非预期退出"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_cancels_streaming_job_and_waits_for_shutdown() {
+        let token = CancellationToken::new();
+        let task = tokio::spawn(start_task_with(
+            config(),
+            token.clone(),
+            &FakePlanning {
+                mode: StreamMode::Streaming,
+                pending: true,
+            },
+        ));
+        tokio::task::yield_now().await;
+        token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("bootstrap must wait to terminal state")
+            .expect("bootstrap task")
+            .expect("shutdown result");
+        assert_eq!(
+            result.status,
+            crate::core::engine::contracts::RunStatus::Shutdown
+        );
     }
 }

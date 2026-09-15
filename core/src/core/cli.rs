@@ -1,6 +1,6 @@
 // cli 命令行参数解析
 
-use crate::core::runner::RunStatus;
+use crate::core::engine::contracts::{RunResult, RunStatus};
 use crate::core::serve::start_job;
 use crate::init_and_watch_config;
 use crate::run_scheduler;
@@ -274,7 +274,7 @@ fn validate_database_identifiers(db_config: &relus_common::DbConfig) -> Result<(
     Ok(())
 }
 
-fn print_run_result(result: &crate::core::runner::RunResult) {
+fn print_run_result(result: &RunResult) {
     match result.status {
         RunStatus::Shutdown => {
             println!(

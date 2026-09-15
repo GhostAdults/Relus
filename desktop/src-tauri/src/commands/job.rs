@@ -1,5 +1,5 @@
 use relus_common::job_config::JobConfig;
-use relus_core::core::runner::RunResult;
+use relus_core::core::engine::contracts::RunResult;
 
 /// Submit and run a synchronization job immediately.
 /// The command only deserializes the frontend payload and dispatches it to

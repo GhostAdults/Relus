@@ -6,7 +6,7 @@ pub mod pipeline;
 use relus_reader as _;
 use relus_writer as _;
 
-use crate::core::runner::RunStatus;
+use crate::core::engine::contracts::RunStatus;
 use crate::core::scheduler::{
     SchedulerControlHandle, SchedulerError, SchedulerResponse, TaskScheduler,
 };

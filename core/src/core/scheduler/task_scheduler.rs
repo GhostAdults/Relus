@@ -7,7 +7,8 @@ use super::control::{
 use super::cron::CronTracker;
 use super::repl::ReplLoop;
 use super::task_slot::{TaskPhase, TaskSlot};
-use crate::core::runner::{start_task, RunStatus};
+use crate::core::engine::contracts::{RunResult, RunStatus};
+use crate::core::serve::start_task;
 use anyhow::Result;
 use relus_common::job_config::{JobConfig, SyncMode};
 use std::any::Any;
@@ -429,7 +430,7 @@ impl TaskScheduler {
     }
 }
 
-fn task_result_to_done(result: Result<crate::core::runner::RunResult>) -> TaskDoneResult {
+fn task_result_to_done(result: Result<RunResult>) -> TaskDoneResult {
     match result {
         Ok(r) => match r.status {
             RunStatus::Success | RunStatus::Partial => TaskDoneResult::Success {

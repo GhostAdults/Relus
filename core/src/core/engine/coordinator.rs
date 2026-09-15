@@ -3,7 +3,7 @@ use super::{
     contracts::{EngineExecutionResult, EngineExecutionStatus, EngineResultStore, JobHandle},
     job_master::JobMaster,
     runtime::{Runtime, TokioRuntime},
-    state::{Job, JobId, JobState, StateRepository, TaskGroupId, TaskGroupState, TaskState},
+    state::{Job, JobId, JobState, StateRepository, TaskGroupState, TaskState},
     task_execution::TaskExecutionService,
     worker::WorkerContext,
 };
@@ -735,46 +735,6 @@ impl CoordinatorService {
         Ok(())
     }
 
-    /// Compatibility wait adapter used by Runner until its DTO migration in #23.
-    pub async fn run_job(
-        &self,
-        plan: crate::core::planner::ExecutionPlan,
-        token: CancellationToken,
-    ) -> Result<Vec<TaskGroupExecutionResult>> {
-        let handle = self.submit_job(plan)?;
-        let result = tokio::select! {
-            result = handle.wait() => result.map_err(anyhow::Error::msg)?,
-            _ = token.cancelled() => {
-                handle.cancel();
-                handle.wait().await.map_err(anyhow::Error::msg)?
-            }
-        };
-        let group_id = handle
-            .snapshot()
-            .and_then(|snapshot| snapshot.task_groups.first().map(|group| group.id))
-            .unwrap_or_else(TaskGroupId::new);
-        let status = match result.status {
-            EngineExecutionStatus::Succeeded => {
-                super::task_execution::TaskGroupExecutionStatus::Succeeded
-            }
-            EngineExecutionStatus::Failed => {
-                super::task_execution::TaskGroupExecutionStatus::Failed
-            }
-            EngineExecutionStatus::Cancelled => {
-                super::task_execution::TaskGroupExecutionStatus::Cancelled
-            }
-        };
-        Ok(vec![TaskGroupExecutionResult {
-            group_id,
-            status,
-            records_read: result.records_read,
-            records_written: result.records_written,
-            records_failed: result.records_failed,
-            cancelled: result.cancelled,
-            error_summary: result.error,
-            elapsed: result.elapsed,
-        }])
-    }
     pub fn query_job(&self, id: JobId) -> Option<Job> {
         self.repository.job(id)
     }
