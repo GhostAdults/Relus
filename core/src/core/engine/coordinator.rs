@@ -3,7 +3,7 @@ use super::{
     contracts::{EngineExecutionResult, EngineExecutionStatus, EngineResultStore, JobHandle},
     job_master::JobMaster,
     runtime::{Runtime, TokioRuntime},
-    state::{Job, JobId, JobState, StateRepository},
+    state::{Job, JobId, JobState, StateRepository, TaskGroupState, TaskState},
     task_execution::TaskExecutionService,
     worker::WorkerContext,
 };
@@ -516,7 +516,9 @@ impl CoordinatorService {
             return;
         }
         let mut handles = Vec::new();
+        let mut deployment_failure = None;
         for group in runtime.groups {
+            let group_id = group.group.id;
             let context = WorkerContext {
                 reader: Arc::clone(&runtime.reader),
                 writer: Arc::clone(&runtime.writer),
@@ -529,69 +531,83 @@ impl CoordinatorService {
                     let message = error.to_string();
                     let cancelled = token.is_cancelled();
                     token.cancel();
-                    finish(
-                        self,
-                        if cancelled {
-                            JobState::CANCELLED
+                    deployment_failure = Some(TaskGroupExecutionResult {
+                        group_id,
+                        status: if cancelled {
+                            super::task_execution::TaskGroupExecutionStatus::Cancelled
                         } else {
-                            JobState::FAILED
+                            super::task_execution::TaskGroupExecutionStatus::Failed
                         },
-                        EngineExecutionResult {
-                            status: if cancelled {
-                                EngineExecutionStatus::Cancelled
-                            } else {
-                                EngineExecutionStatus::Failed
-                            },
-                            records_read: 0,
-                            records_written: 0,
-                            records_failed: 0,
-                            cancelled,
-                            elapsed: started.elapsed(),
-                            error: Some(if cancelled {
-                                "Shutdown".into()
-                            } else {
-                                message
-                            }),
-                        },
-                        store,
-                    );
-                    return;
+                        records_read: 0,
+                        records_written: 0,
+                        records_failed: 0,
+                        cancelled,
+                        error_summary: Some(if cancelled {
+                            "Shutdown".into()
+                        } else {
+                            message
+                        }),
+                        elapsed: started.elapsed(),
+                    });
+                    break;
                 }
             }
         }
-        if let Err(error) = self.transition_job(id, JobState::RUNNING) {
-            token.cancel();
-            finish(
-                self,
-                JobState::FAILED,
-                EngineExecutionResult {
-                    status: EngineExecutionStatus::Failed,
-                    records_read: 0,
-                    records_written: 0,
-                    records_failed: 0,
-                    cancelled: false,
-                    elapsed: started.elapsed(),
-                    error: Some(format!("failed to persist RUNNING lifecycle: {error}")),
-                },
-                store,
-            );
-            return;
+        if deployment_failure.is_none() {
+            if let Err(error) = self.transition_job(id, JobState::RUNNING) {
+                token.cancel();
+                finish(
+                    self,
+                    JobState::FAILED,
+                    EngineExecutionResult {
+                        status: EngineExecutionStatus::Failed,
+                        records_read: 0,
+                        records_written: 0,
+                        records_failed: 0,
+                        cancelled: false,
+                        elapsed: started.elapsed(),
+                        error: Some(format!("failed to persist RUNNING lifecycle: {error}")),
+                    },
+                    store,
+                );
+                return;
+            }
         }
         let mut results = Vec::new();
+        results.extend(deployment_failure);
         for handle in handles {
             let group_id = handle.group_id();
             match handle.join().await {
                 Ok(result) => results.push(result),
-                Err(error) => results.push(TaskGroupExecutionResult {
-                    group_id,
-                    status: super::task_execution::TaskGroupExecutionStatus::Failed,
-                    records_read: 0,
-                    records_written: 0,
-                    records_failed: 0,
-                    cancelled: token.is_cancelled(),
-                    error_summary: Some(error.to_string()),
-                    elapsed: started.elapsed(),
-                }),
+                Err(error) => {
+                    let mut message = error.to_string();
+                    if let Err(state_error) = self
+                        .repository
+                        .update_task_group(group_id, TaskGroupState::FAILED)
+                    {
+                        message
+                            .push_str(&format!("; failed to persist group failure: {state_error}"));
+                    }
+                    for task in self.repository.tasks(group_id) {
+                        if let Err(state_error) =
+                            self.repository.update_task(task.id, TaskState::FAILED)
+                        {
+                            message.push_str(&format!(
+                                "; failed to persist task failure: {state_error}"
+                            ));
+                        }
+                    }
+                    results.push(TaskGroupExecutionResult {
+                        group_id,
+                        status: super::task_execution::TaskGroupExecutionStatus::Failed,
+                        records_read: 0,
+                        records_written: 0,
+                        records_failed: 0,
+                        cancelled: false,
+                        error_summary: Some(message),
+                        elapsed: started.elapsed(),
+                    });
+                }
             }
         }
         let failed = results.iter().any(|r| {

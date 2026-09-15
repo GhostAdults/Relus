@@ -75,13 +75,14 @@ impl EngineResultStore {
     }
     async fn wait(&self) -> Result<EngineExecutionResult, String> {
         loop {
+            let notified = self.notify.notified();
             if let Some(result) = self.result() {
                 return Ok(result);
             }
             if let Some(error) = self.error() {
                 return Err(error);
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
