@@ -142,7 +142,7 @@ impl JobHandle {
 }
 
 /// Helper for contract tests and future Coordinator integration.
-pub fn test_job_handle(repository: StateRepository) -> (JobHandle, EngineResultStore) {
+pub(crate) fn test_job_handle(repository: StateRepository) -> (JobHandle, EngineResultStore) {
     let id = JobId::new();
     repository.register_job(Job::new(id)).expect("fresh job id");
     repository
