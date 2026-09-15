@@ -119,12 +119,17 @@ impl JobHandle {
         for group in &groups {
             tasks.extend(self.repository.tasks(group.id));
         }
+        let result = self.completion.result();
+        let error = self
+            .completion
+            .error()
+            .or_else(|| result.as_ref().and_then(|r| r.error.clone()));
         Some(JobSnapshot {
             job,
             task_groups: groups,
             tasks,
-            result: self.completion.result(),
-            error: self.completion.error(),
+            result,
+            error,
         })
     }
 
