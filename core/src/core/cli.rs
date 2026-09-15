@@ -241,8 +241,8 @@ fn sanitize_identifier(s: &str) -> Result<()> {
 fn read_job_config(path: &PathBuf) -> Result<JobConfig> {
     let data = fs::read_to_string(path)
         .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let cfg: JobConfig = serde_json::from_str(&data)
-        .map_err(|e| anyhow::anyhow!("配置文件解析失败: {} - 错误: {}", path.display(), e))?;
+    let cfg = JobConfig::parse_json(&data)
+        .with_context(|| format!("配置文件解析失败: {}", path.display()))?;
     Ok(cfg)
 }
 
@@ -251,8 +251,8 @@ fn validate_job_identifiers(cfg: &JobConfig) -> Result<()> {
         let db_config = cfg.source.parse_database_config()?;
         validate_database_identifiers(&db_config)?;
     }
-    if cfg.target.source_type == "database" {
-        let db_config = cfg.target.parse_database_config()?;
+    if cfg.sink.source_type == "database" {
+        let db_config = cfg.sink.parse_database_config()?;
         validate_database_identifiers(&db_config)?;
     }
     for k in cfg.column_mapping.keys() {
@@ -410,4 +410,30 @@ fn load_job_config(path: &PathBuf) -> Result<(String, JobConfig)> {
         .ok_or_else(|| anyhow::anyhow!("job_id is required (in config or from filename)"))?;
 
     Ok((job_id, cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn cli_loader_uses_job_config_compatibility_parser() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "{}",
+            serde_json::json!({
+                "input":{"name":"source","type":"api","config":{}},
+                "output":{"name":"sink","type":"api","config":{}},
+                "column_mapping":{},
+                "column_types":null
+            })
+        )
+        .unwrap();
+
+        let config = read_job_config(&file.path().to_path_buf()).unwrap();
+        assert_eq!(config.source.name, "source");
+        assert_eq!(config.sink.name, "sink");
+    }
 }

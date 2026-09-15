@@ -16,7 +16,7 @@
       }
     }
   },
-  "target": {
+  "sink": {
     "name": "db_target",
     "type": "database",
     "writer_mode": "insert",

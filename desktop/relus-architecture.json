@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Relus Rust Data Synchronization Engine",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "relus-architecture.html",
+    "repository": { "url": "https://github.com/GhostAdults/Relus", "provider": "github", "link_mode": "web", "revision": "fc9f215d7b1f16c60e7c580e67b0c6939fa9057b" },
+    "views": [
+      { "id": "task-path", "label": "任务执行主链", "focus": ["desktop", "tauri", "planner", "engine", "source", "sink"], "note": "从桌面任务提交到 Source/Transform/Sink 执行。" },
+      { "id": "plugin-boundary", "label": "插件与连接器", "focus": ["registry", "source", "sink", "connectors"], "note": "Reader/Writer 插件通过 Registry 与执行引擎解耦。" },
+      { "id": "control-plane", "label": "控制与状态", "focus": ["desktop", "tauri", "scheduler", "checkpoint"], "note": "任务提交、调度、取消和恢复能力的演进边界。" }
+    ]
+  },
+  "components": [
+    { "id": "desktop", "type": "frontend", "label": "Relus Desktop", "sublabel": "desktop UI", "pos": [40, 300], "size": [150, 64], "sources": [{ "path": "desktop/components/tasks/task-wizard.tsx", "label": "Task Wizard" }] },
+    { "id": "tauri", "type": "backend", "label": "Tauri Commands", "sublabel": "connect / start_job", "pos": [250, 300], "size": [156, 64], "sources": [{ "path": "desktop/src-tauri/src/commands/job.rs", "label": "Job commands" }] },
+    { "id": "planner", "type": "backend", "label": "Job Planner", "sublabel": "JobConfig → ExecutionPlan", "pos": [470, 300], "size": [170, 64], "tag": "target architecture" },
+    { "id": "engine", "type": "backend", "label": "Execution Engine", "sublabel": "TaskExecutor + Pipeline", "pos": [705, 300], "size": [176, 64], "sources": [{ "path": "core/src/core/runner.rs", "label": "TaskExecutor" }, { "path": "core/src/core/pipeline_executor.rs", "label": "Pipeline" }] },
+    { "id": "source", "type": "backend", "label": "Source", "sublabel": "Reader plugins / split", "pos": [930, 180], "size": [158, 64], "sources": [{ "path": "reader/src/lib.rs", "label": "ReaderRegistry" }] },
+    { "id": "transform", "type": "backend", "label": "Transform", "sublabel": "mapping / type conversion", "pos": [930, 300], "size": [158, 64], "sources": [{ "path": "core/src/pipeline/record_builder.rs", "label": "RecordBuilder" }] },
+    { "id": "sink", "type": "backend", "label": "Sink", "sublabel": "Writer plugins / batches", "pos": [930, 420], "size": [158, 64], "sources": [{ "path": "writer/src/lib.rs", "label": "WriterRegistry" }] },
+    { "id": "registry", "type": "backend", "label": "Plugin Registry", "sublabel": "inventory + lazy loading", "pos": [1140, 180], "size": [176, 64], "sources": [{ "path": "reader/src/lib.rs", "label": "inventory::collect" }, { "path": "writer/src/lib.rs", "label": "inventory::collect" }] },
+    { "id": "connectors", "type": "database", "label": "RDBMS Connectors", "sublabel": "MySQL / PostgreSQL pools", "pos": [1140, 420], "size": [176, 64], "sources": [{ "path": "connector-rdbms/src/connector.rs", "label": "pool + metadata" }] },
+    { "id": "scheduler", "type": "backend", "label": "Scheduler", "sublabel": "cron / cancellation", "pos": [470, 510], "size": [170, 64], "sources": [{ "path": "core/src/core/scheduler/task_scheduler.rs", "label": "TaskScheduler" }] },
+    { "id": "checkpoint", "type": "database", "label": "State & Checkpoint", "sublabel": "recovery boundary", "pos": [705, 510], "size": [176, 64], "tag": "next engine capability" }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Relus Desktop Application", "wraps": ["desktop", "tauri"], "pad": 18 },
+    { "kind": "region", "label": "Rust Workspace", "wraps": ["planner", "engine", "source", "transform", "sink", "registry", "scheduler", "checkpoint"], "pad": 22 },
+    { "kind": "security-group", "label": "External database boundary", "wraps": ["connectors"], "pad": 14 }
+  ],
+  "connections": [
+    { "id": "ui-to-tauri", "from": "desktop", "to": "tauri", "label": "invoke start_job", "variant": "emphasis", "labelDy": -26 },
+    { "id": "tauri-to-planner", "from": "tauri", "to": "planner", "label": "validated JobConfig", "variant": "emphasis", "labelDy": -26 },
+    { "id": "planner-to-engine", "from": "planner", "to": "engine", "label": "ExecutionPlan", "variant": "emphasis", "labelDy": -26 },
+    { "id": "engine-to-source", "from": "engine", "to": "source", "label": "run partitions", "fromSide": "right", "toSide": "left" },
+    { "id": "source-to-transform", "from": "source", "to": "transform", "label": "RecordBatch", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "transform-to-sink", "from": "transform", "to": "sink", "label": "mapped batch", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "registry-to-source", "from": "registry", "to": "source", "variant": "dashed", "fromSide": "left", "toSide": "right" },
+    { "id": "registry-to-sink", "from": "registry", "to": "sink", "variant": "dashed", "fromSide": "left", "toSide": "right" },
+    { "id": "sink-to-connectors", "from": "sink", "to": "connectors", "label": "SQL / pool", "variant": "emphasis", "labelAt": [1114, 498] },
+    { "id": "scheduler-to-engine", "from": "scheduler", "to": "engine", "label": "start / cancel", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "engine-to-checkpoint", "from": "engine", "to": "checkpoint", "label": "state boundary", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelAt": [910, 378] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Current foundation", "items": ["Reader/Writer use inventory-based lazy registries", "TaskExecutor owns batch and streaming execution", "Pipeline currently carries mapping into the run path"] },
+    { "dot": "emerald", "title": "Planner boundary", "items": ["Parse and validate JobConfig once", "Build ExecutionPlan with operators and runtime settings", "Keep the engine independent from the external JSON shape"] },
+    { "dot": "violet", "title": "Evolution path", "items": ["Promote Reader/Writer to Source/Sink connectors", "Insert Transform operators between source and sink", "Add checkpoint and recovery under engine control"] }
+  ]
+}

@@ -91,6 +91,10 @@ mod tests {
         let result = handle.wait().await.unwrap();
         assert_eq!(result.status, EngineExecutionStatus::Succeeded);
         assert_eq!(handle.state(), Some(JobState::SUCCEEDED));
+        let shared = coordinator.job_handle(handle.id()).expect("shared handle");
+        assert!(!shared.cancel());
+        assert_eq!(shared.wait().await.unwrap(), result);
+        assert_eq!(shared.snapshot(), handle.snapshot());
     }
 
     #[derive(Clone, Copy)]
@@ -335,6 +339,9 @@ mod tests {
             .unwrap();
         let result = handle.wait().await.unwrap();
         assert_eq!(result.status, EngineExecutionStatus::Failed);
+        let shared = coordinator.job_handle(handle.id()).expect("shared handle");
+        assert!(!shared.cancel());
+        assert_eq!(shared.wait().await.unwrap(), result);
         assert_eq!(handle.state(), Some(JobState::FAILED));
         let snapshot = handle.snapshot().unwrap();
         assert!(snapshot
@@ -418,6 +425,14 @@ impl CoordinatorService {
             this.jobs.write().remove(&id);
         });
         Ok(handle)
+    }
+
+    pub fn job_handle(&self, id: JobId) -> Option<JobHandle> {
+        let store = self.results.read().get(&id).cloned()?;
+        let token = self.jobs.read().get(&id).cloned().unwrap_or_default();
+        self.repository
+            .job(id)
+            .map(|_| JobHandle::new(id, self.repository.clone(), token, store))
     }
 
     async fn execute_and_store(

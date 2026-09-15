@@ -248,7 +248,7 @@ async fn main() {
 
     let config = JobConfig {
         source: input,
-        target: output,
+        sink: output,
         column_mapping,
         column_types: Some(column_types),
         sync_mode: None,

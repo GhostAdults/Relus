@@ -19,11 +19,7 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    pub fn from_engine(
-        result: EngineExecutionResult,
-        stream_mode: StreamMode,
-        shutdown_requested: bool,
-    ) -> Self {
+    pub fn from_engine(result: EngineExecutionResult, stream_mode: StreamMode) -> Self {
         let mut stats = RunnerStats {
             records_read: result.records_read,
             records_written: result.records_written,
@@ -33,9 +29,8 @@ impl RunResult {
         };
         stats.calculate_throughput();
 
-        let shutdown = shutdown_requested
-            || result.cancelled
-            || matches!(result.status, EngineExecutionStatus::Cancelled);
+        let shutdown =
+            result.cancelled || matches!(result.status, EngineExecutionStatus::Cancelled);
         let failed = matches!(result.status, EngineExecutionStatus::Failed);
         let status = if shutdown {
             RunStatus::Shutdown
@@ -327,7 +322,6 @@ mod tests {
         let success = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
             StreamMode::Batch,
-            false,
         );
         assert_eq!(success.status, RunStatus::Success);
         assert_eq!(success.stats.throughput, 4.0);
@@ -335,7 +329,6 @@ mod tests {
         let partial = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Failed, 8, 2, false),
             StreamMode::Batch,
-            false,
         );
         assert_eq!(partial.status, RunStatus::Partial);
         assert_eq!(partial.error.as_deref(), Some("write failed"));
@@ -343,7 +336,6 @@ mod tests {
         let failed = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Failed, 0, 2, false),
             StreamMode::Batch,
-            false,
         );
         assert_eq!(failed.status, RunStatus::Failed);
     }
@@ -353,7 +345,6 @@ mod tests {
         let completed = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Succeeded, 0, 0, false),
             StreamMode::Streaming,
-            false,
         );
         assert_eq!(completed.status, RunStatus::Failed);
         assert_eq!(
@@ -364,7 +355,6 @@ mod tests {
         let cancelled = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Cancelled, 3, 0, true),
             StreamMode::Streaming,
-            false,
         );
         assert_eq!(cancelled.status, RunStatus::Shutdown);
         assert!(cancelled.error.is_none());
@@ -372,10 +362,8 @@ mod tests {
         let raced = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Succeeded, 3, 0, false),
             StreamMode::Streaming,
-            true,
         );
-        assert_eq!(raced.status, RunStatus::Shutdown);
-        assert!(raced.error.is_none());
+        assert_eq!(raced.status, RunStatus::Failed);
     }
 
     #[test]
@@ -383,7 +371,6 @@ mod tests {
         let result = RunResult::from_engine(
             execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
             StreamMode::Batch,
-            false,
         );
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["status"], "Success");

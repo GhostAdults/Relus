@@ -27,6 +27,43 @@ use relus_common::resp::ApiResp;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+#[derive(Clone)]
+pub struct ApplicationState {
+    coordinator: Arc<crate::core::engine::coordinator::CoordinatorService>,
+}
+
+impl ApplicationState {
+    pub fn new() -> Self {
+        Self {
+            coordinator: Arc::new(crate::core::engine::coordinator::CoordinatorService::new(
+                crate::core::engine::state::StateRepository::new(),
+            )),
+        }
+    }
+
+    pub fn coordinator(&self) -> Arc<crate::core::engine::coordinator::CoordinatorService> {
+        Arc::clone(&self.coordinator)
+    }
+}
+
+impl Default for ApplicationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static APPLICATION_STATE: OnceLock<ApplicationState> = OnceLock::new();
+
+pub fn application_state() -> ApplicationState {
+    APPLICATION_STATE.get_or_init(ApplicationState::new).clone()
+}
+
+/// Returns the process-wide Engine boundary used by all application entry points.
+pub fn application_coordinator() -> Arc<crate::core::engine::coordinator::CoordinatorService> {
+    application_state().coordinator()
+}
 
 fn load_embedded_defaults() -> serde_json::Value {
     let defaults_content = include_str!("../../cli/user_config/default.config.json");
@@ -156,17 +193,26 @@ pub fn init_and_watch_config() {
 pub fn read_config(path: PathBuf) -> Result<JobConfig> {
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let cfg: JobConfig = serde_json::from_str(&data)
+    let cfg = JobConfig::parse_json(&data)
         .with_context(|| format!("配置文件解析失败: {}", path.display()))?;
     Ok(cfg)
 }
 
-struct CoreSyncExecutor;
+struct CoreSyncExecutor {
+    coordinator: Arc<crate::core::engine::coordinator::CoordinatorService>,
+}
 
 impl SyncExecutor for CoreSyncExecutor {
     fn execute_sync(&self, config: JobConfig) -> ApiFuture<ApiHandlerResult> {
+        let coordinator = Arc::clone(&self.coordinator);
         Box::pin(async move {
-            match crate::core::serve::start_job(config).await {
+            match crate::core::serve::start_task_with_coordinator(
+                Arc::new(config),
+                tokio_util::sync::CancellationToken::new(),
+                coordinator,
+            )
+            .await
+            {
                 Ok(result) => (
                     StatusCode::OK,
                     ApiResp {
@@ -209,8 +255,9 @@ impl SchedulerControl for CoreSchedulerControl {
     }
 }
 
-fn api_state() -> SharedState {
-    let mut state = AppState::new().with_sync_executor(Arc::new(CoreSyncExecutor));
+fn api_state(app: ApplicationState) -> SharedState {
+    let coordinator = app.coordinator();
+    let mut state = AppState::new().with_sync_executor(Arc::new(CoreSyncExecutor { coordinator }));
     if let Some(config_manager) = init_system_config() {
         state = state.with_config_manager(config_manager);
     }
@@ -270,8 +317,9 @@ fn scheduler_failure(error: SchedulerError) -> ApiHandlerResult {
 
 // 启动 HTTP 服务
 pub async fn run_serve(host: String, port: u16) -> Result<()> {
+    let app = application_state();
     init_system_config();
-    relus_api::server::start(host, port, api_state()).await?;
+    relus_api::server::start(host, port, api_state(app)).await?;
     Ok(())
 }
 
@@ -315,7 +363,10 @@ pub async fn run_scheduler(
         .map(|p| p.join("checkpoints.redb"))
         .unwrap_or_else(|| PathBuf::from("checkpoints.redb"));
 
-    let mut scheduler = TaskScheduler::new(checkpoint_dir)?;
+    let app = application_state();
+    let coordinator = app.coordinator();
+    let mut scheduler =
+        TaskScheduler::new_with_coordinator(checkpoint_dir, Arc::clone(&coordinator))?;
     let scheduler_handle = scheduler.control_handle();
 
     if configs.is_empty() {
@@ -345,7 +396,7 @@ pub async fn run_scheduler(
 
     let (host, port) = scheduler_server_addr(host, port);
     let mut state = AppState::new()
-        .with_sync_executor(Arc::new(CoreSyncExecutor))
+        .with_sync_executor(Arc::new(CoreSyncExecutor { coordinator }))
         .with_scheduler(Arc::new(CoreSchedulerControl {
             handle: scheduler_handle,
         }));
@@ -363,4 +414,105 @@ pub async fn run_scheduler(
     tracing::info!("[Run] scheduler stopped");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod application_state_tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
+    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
+
+    struct EmptyReader;
+
+    #[async_trait]
+    impl DataReaderJob for EmptyReader {
+        async fn split(&self, _: usize) -> Result<SplitReaderResult> {
+            unreachable!("prepared plan must not split again")
+        }
+
+        fn description(&self) -> String {
+            "application fake reader".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataReaderTask for EmptyReader {
+        async fn read_data(&self, _: &relus_reader::ReadTask) -> Result<JsonStream> {
+            unreachable!("empty plan has no tasks")
+        }
+    }
+
+    struct EmptyWriter;
+
+    #[async_trait]
+    impl DataWriterJob for EmptyWriter {
+        async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+            unreachable!("empty plan needs no writer split")
+        }
+
+        fn description(&self) -> String {
+            "application fake writer".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataWriterTask for EmptyWriter {
+        async fn write_data(
+            &self,
+            _: WriteTask,
+            _: tokio::sync::mpsc::Receiver<relus_common::PipelineMessage>,
+        ) -> Result<usize> {
+            unreachable!("empty plan has no tasks")
+        }
+    }
+
+    fn empty_plan() -> crate::core::planner::ExecutionPlan {
+        crate::core::planner::ExecutionPlan {
+            reader: Arc::new(EmptyReader),
+            writer: Arc::new(EmptyWriter),
+            pipeline: Default::default(),
+            record_builder: Arc::new(
+                crate::pipeline::RecordBuilder::new(Default::default(), None)
+                    .expect("empty mapping"),
+            ),
+            reader_split: SplitReaderResult {
+                total_records: 0,
+                tasks: vec![],
+                stream_mode: StreamMode::Batch,
+            },
+            stream_mode: StreamMode::Batch,
+        }
+    }
+
+    #[tokio::test]
+    async fn application_entry_adapters_observe_one_submitted_job() {
+        let app = ApplicationState::new();
+        let cli = app.coordinator();
+        let http = app.coordinator();
+        let scheduler = app.coordinator();
+        let desktop = app.coordinator();
+
+        assert!(Arc::ptr_eq(&cli, &http));
+        assert!(Arc::ptr_eq(&cli, &scheduler));
+        assert!(Arc::ptr_eq(&cli, &desktop));
+
+        let submitted = cli.submit_job(empty_plan()).expect("CLI submit");
+        let result = submitted.wait().await.expect("CLI wait");
+        let http_handle = http.job_handle(submitted.id()).expect("HTTP query");
+        let scheduler_handle = scheduler
+            .job_handle(submitted.id())
+            .expect("Scheduler query");
+        let desktop_handle = desktop.job_handle(submitted.id()).expect("Desktop query");
+
+        assert_eq!(http_handle.snapshot(), scheduler_handle.snapshot());
+        assert_eq!(http_handle.snapshot(), desktop_handle.snapshot());
+        assert_eq!(http_handle.wait().await.expect("HTTP result"), result);
+        assert_eq!(
+            scheduler_handle.wait().await.expect("Scheduler result"),
+            result
+        );
+        assert_eq!(desktop_handle.wait().await.expect("Desktop result"), result);
+    }
 }

@@ -14,7 +14,6 @@ use tracing::info;
 use crate::core::engine::{
     contracts::{JobHandle, RunResult},
     coordinator::CoordinatorService,
-    state::StateRepository,
 };
 use crate::core::planner::{Planner, PlanningDependencies, RegistryPlanningDependencies};
 
@@ -23,15 +22,64 @@ pub async fn start_task(
     config: Arc<JobConfig>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<RunResult> {
-    start_task_with(config, cancel_token, &RegistryPlanningDependencies).await
+    start_task_with_coordinator(config, cancel_token, crate::application_coordinator()).await
+}
+
+pub(crate) async fn start_task_with_coordinator(
+    config: Arc<JobConfig>,
+    cancel_token: CancellationToken,
+    coordinator: Arc<CoordinatorService>,
+) -> anyhow::Result<RunResult> {
+    start_task_with(
+        config,
+        cancel_token,
+        &RegistryPlanningDependencies,
+        coordinator,
+    )
+    .await
 }
 
 async fn start_task_with(
     config: Arc<JobConfig>,
     cancel_token: CancellationToken,
     planning: &dyn PlanningDependencies,
+    coordinator: Arc<CoordinatorService>,
 ) -> anyhow::Result<RunResult> {
     let plan = Planner::prepare_with(config, planning).await?;
+    let (handle, stream_mode) = submit_prepared_job(plan, coordinator)?;
+
+    wait_for_run_result(handle, stream_mode, cancel_token).await
+}
+
+async fn wait_for_run_result(
+    handle: JobHandle,
+    stream_mode: StreamMode,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<RunResult> {
+    let result = tokio::select! {
+        result = handle.wait() => result.map_err(anyhow::Error::msg)?,
+        _ = cancel_token.cancelled() => {
+            handle.cancel();
+            handle.wait().await.map_err(anyhow::Error::msg)?
+        }
+    };
+    Ok(RunResult::from_engine(result, stream_mode))
+}
+
+pub(crate) async fn submit_job_with(
+    config: Arc<JobConfig>,
+    planning: &dyn PlanningDependencies,
+    coordinator: Arc<CoordinatorService>,
+) -> anyhow::Result<JobHandle> {
+    let plan = Planner::prepare_with(config, planning).await?;
+    let (handle, _) = submit_prepared_job(plan, coordinator)?;
+    Ok(handle)
+}
+
+fn submit_prepared_job(
+    plan: crate::core::planner::ExecutionPlan,
+    coordinator: Arc<CoordinatorService>,
+) -> anyhow::Result<(JobHandle, StreamMode)> {
     let stream_mode = plan.stream_mode;
 
     info!(
@@ -44,20 +92,21 @@ async fn start_task_with(
         plan.reader_split.total_records
     );
 
-    let coordinator = CoordinatorService::new(StateRepository::new());
-    let handle: JobHandle = coordinator.submit_job(plan)?;
-    let result = tokio::select! {
-        result = handle.wait() => result.map_err(anyhow::Error::msg)?,
-        _ = cancel_token.cancelled() => {
-            handle.cancel();
-            handle.wait().await.map_err(anyhow::Error::msg)?
-        }
-    };
-    Ok(RunResult::from_engine(
-        result,
-        stream_mode,
-        cancel_token.is_cancelled(),
-    ))
+    Ok((coordinator.submit_job(plan)?, stream_mode))
+}
+
+/// Plans and submits a job to the shared application Engine without waiting.
+pub async fn submit_job(config: Arc<JobConfig>) -> anyhow::Result<JobHandle> {
+    submit_job_with(
+        config,
+        &RegistryPlanningDependencies,
+        crate::application_coordinator(),
+    )
+    .await
+}
+
+pub fn job_handle(id: crate::core::engine::state::JobId) -> Option<JobHandle> {
+    crate::application_coordinator().job_handle(id)
 }
 
 /// Starts an immediate task.
@@ -353,6 +402,9 @@ mod tests {
                 mode: StreamMode::Batch,
                 pending: false,
             },
+            Arc::new(CoordinatorService::new(
+                crate::core::engine::state::StateRepository::new(),
+            )),
         )
         .await
         .expect("batch result");
@@ -371,6 +423,9 @@ mod tests {
                 mode: StreamMode::Streaming,
                 pending: false,
             },
+            Arc::new(CoordinatorService::new(
+                crate::core::engine::state::StateRepository::new(),
+            )),
         )
         .await
         .expect("stream result");
@@ -391,6 +446,9 @@ mod tests {
                 mode: StreamMode::Streaming,
                 pending: true,
             },
+            Arc::new(CoordinatorService::new(
+                crate::core::engine::state::StateRepository::new(),
+            )),
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -403,6 +461,57 @@ mod tests {
         assert_eq!(
             result.status,
             crate::core::engine::contracts::RunStatus::Shutdown
+        );
+    }
+
+    #[tokio::test]
+    async fn async_submit_exposes_shared_handle_snapshot_and_repeatable_result() {
+        let coordinator = Arc::new(CoordinatorService::new(
+            crate::core::engine::state::StateRepository::new(),
+        ));
+        let handle = submit_job_with(
+            config(),
+            &FakePlanning {
+                mode: StreamMode::Batch,
+                pending: false,
+            },
+            Arc::clone(&coordinator),
+        )
+        .await
+        .expect("submit handle");
+        let first = handle.wait().await.expect("first result");
+        let shared = coordinator
+            .job_handle(handle.id())
+            .expect("shared application handle");
+        assert_eq!(shared.snapshot(), handle.snapshot());
+        assert_eq!(shared.wait().await.expect("shared result"), first);
+        assert_eq!(shared.wait().await.expect("repeat result"), first);
+    }
+
+    #[tokio::test]
+    async fn late_cancellation_does_not_override_completed_success() {
+        let coordinator = Arc::new(CoordinatorService::new(
+            crate::core::engine::state::StateRepository::new(),
+        ));
+        let handle = submit_job_with(
+            config(),
+            &FakePlanning {
+                mode: StreamMode::Batch,
+                pending: false,
+            },
+            coordinator,
+        )
+        .await
+        .expect("submit handle");
+        let _ = handle.wait().await.expect("completed result");
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = wait_for_run_result(handle, StreamMode::Batch, token)
+            .await
+            .expect("compatibility result");
+        assert_eq!(
+            result.status,
+            crate::core::engine::contracts::RunStatus::Success
         );
     }
 }

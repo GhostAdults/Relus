@@ -22,16 +22,16 @@ async fn main() {
     };
 
     // TODO: 替换为实际的 JobConfig 配置文件加载
-    let cfg: JobConfig = serde_json::from_str("{}").expect("请提供有效的 JobConfig 配置");
+    let cfg = JobConfig::parse_json("{}").expect("请提供有效的 JobConfig 配置");
     println!("调用 start_job");
     let mut cfg = cfg;
     cfg.column_mapping = mapping_config.column_mapping;
     cfg.column_types = Some(mapping_config.column_types);
     if let Some(mode) = mapping_config.mode {
-        cfg.target.writer_mode = Some(mode);
+        cfg.sink.writer_mode = Some(mode);
     }
     if let Some(key_columns) = mapping_config.key_columns {
-        if let Some(obj) = cfg.target.config.as_object_mut() {
+        if let Some(obj) = cfg.sink.config.as_object_mut() {
             obj.insert("key_columns".to_string(), serde_json::json!(key_columns));
         }
     }

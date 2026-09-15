@@ -1,8 +1,8 @@
 mod commands;
 
 use commands::{
-    connect_database, get_database_table_schema, list_database_tables, list_source_types, start_job,
-    DatabaseSession,
+    connect_database, get_database_table_schema, list_database_tables, list_source_types,
+    start_job, DatabaseSession,
 };
 
 #[tauri::command]
@@ -18,6 +18,7 @@ pub fn run() {
     // Load the shared application configuration for desktop commands. The CLI
     // controls watcher startup per command, so Tauri only initializes config.
     let _ = relus_core::init_system_config();
+    let _ = relus_core::application_state();
 
     tauri::Builder::default()
         .manage(DatabaseSession::default())

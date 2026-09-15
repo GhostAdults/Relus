@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::{fmt, str::FromStr};
@@ -8,8 +9,8 @@ use crate::data_source_config::DataSourceConfig;
 pub struct JobConfig {
     #[serde(alias = "input")]
     pub source: DataSourceConfig,
-    #[serde(alias = "output")]
-    pub target: DataSourceConfig,
+    #[serde(alias = "target", alias = "output")]
+    pub sink: DataSourceConfig,
     pub column_mapping: BTreeMap<String, String>,
     pub column_types: Option<BTreeMap<String, String>>,
     pub sync_mode: Option<SyncMode>,
@@ -19,6 +20,98 @@ pub struct JobConfig {
     pub job_id: Option<String>,
     #[serde(default)]
     pub schedule: Option<ScheduleConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JobConfigParseMode {
+    #[default]
+    Compatible,
+    Strict,
+}
+
+const JOB_FIELDS: &[&str] = &[
+    "source",
+    "input",
+    "sink",
+    "target",
+    "output",
+    "column_mapping",
+    "column_types",
+    "sync_mode",
+    "batch_size",
+    "channel_buffer_size",
+    "job_id",
+    "schedule",
+];
+const DATA_SOURCE_FIELDS: &[&str] = &[
+    "name",
+    "type",
+    "is_table_mode",
+    "query_sql",
+    "writer_mode",
+    "config",
+];
+const SCHEDULE_FIELDS: &[&str] = &["type", "value"];
+
+fn reject_unknown_fields(value: &serde_json::Value, path: &str, allowed: &[&str]) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        anyhow::bail!("config.parse.field: {path}.{field}: unknown field `{field}`");
+    }
+    Ok(())
+}
+
+fn validate_strict_fields(value: &serde_json::Value) -> Result<()> {
+    reject_unknown_fields(value, "$", JOB_FIELDS)?;
+    if let Some(source) = value.get("source").or_else(|| value.get("input")) {
+        reject_unknown_fields(source, "source", DATA_SOURCE_FIELDS)?;
+    }
+    if let Some(sink) = value
+        .get("sink")
+        .or_else(|| value.get("target"))
+        .or_else(|| value.get("output"))
+    {
+        reject_unknown_fields(sink, "sink", DATA_SOURCE_FIELDS)?;
+    }
+    if let Some(schedule) = value.get("schedule") {
+        reject_unknown_fields(schedule, "schedule", SCHEDULE_FIELDS)?;
+    }
+    Ok(())
+}
+
+impl JobConfig {
+    pub fn parse_json(input: &str) -> Result<Self> {
+        Self::parse_json_with_mode(input, JobConfigParseMode::Compatible)
+    }
+
+    pub fn parse_value(value: serde_json::Value) -> Result<Self> {
+        Self::parse_value_with_mode(value, JobConfigParseMode::Compatible)
+    }
+
+    pub fn parse_json_with_mode(input: &str, mode: JobConfigParseMode) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_str(input)
+            .map_err(|error| anyhow::anyhow!("config.parse.json: {}", error))?;
+        Self::parse_value_with_mode(value, mode)
+    }
+
+    pub fn parse_value_with_mode(
+        value: serde_json::Value,
+        mode: JobConfigParseMode,
+    ) -> Result<Self> {
+        if mode == JobConfigParseMode::Strict {
+            validate_strict_fields(&value)?;
+        }
+        let encoded = serde_json::to_string(&value).context("config.parse.value")?;
+        let mut deserializer = serde_json::Deserializer::from_str(&encoded);
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            anyhow::anyhow!("config.parse.field: {}: {}", error.path(), error.inner())
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -65,7 +158,7 @@ impl WriteMode {
 
     pub fn from_config(config: &JobConfig) -> Self {
         config
-            .target
+            .sink
             .writer_mode
             .as_deref()
             .and_then(|mode| mode.parse().ok())
@@ -155,3 +248,97 @@ pub struct MappingConfig {
 //         }
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn job(source: &str, sink: &str) -> serde_json::Value {
+        let mut value = json!({
+            "column_mapping": {},
+            "column_types": null
+        });
+        value[source] = json!({"name":"source","type":"api","config":{}});
+        value[sink] = json!({"name":"sink","type":"database","config":{}});
+        value
+    }
+
+    #[test]
+    fn parses_canonical_and_compatibility_names() {
+        for (source, sink) in [
+            ("source", "sink"),
+            ("input", "output"),
+            ("source", "target"),
+        ] {
+            let config = JobConfig::parse_value(job(source, sink)).unwrap();
+            assert_eq!(config.source.name, "source");
+            assert_eq!(config.sink.name, "sink");
+        }
+    }
+
+    #[test]
+    fn compatible_mode_ignores_unknown_top_level_fields() {
+        let mut value = job("source", "sink");
+        value["future_option"] = json!(true);
+        JobConfig::parse_value(value).unwrap();
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_top_level_fields() {
+        let mut value = job("source", "sink");
+        value["future_option"] = json!(true);
+        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("config.parse.field"));
+        assert!(error.contains("future_option"));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_data_source_fields_with_path() {
+        let mut value = job("source", "sink");
+        value["source"]["future_option"] = json!(true);
+        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("source"));
+        assert!(error.contains("future_option"));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_schedule_fields_with_path() {
+        let mut value = job("source", "sink");
+        value["schedule"] = json!({"type":"cron","value":"*/5 * * * *","typo":true});
+        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("schedule.typo"));
+    }
+
+    #[test]
+    fn reports_json_and_field_errors_separately() {
+        let error = JobConfig::parse_json("{").unwrap_err().to_string();
+        assert!(error.contains("config.parse.json"));
+        assert!(error.contains("line 1 column"));
+
+        let error = JobConfig::parse_value(json!({
+            "source": {"name":"source","type":"api","config":{}},
+            "sink": {"name":"sink","type":"database","config":{}},
+            "column_mapping": []
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("config.parse.field"));
+        assert!(error.contains("column_mapping"));
+    }
+
+    #[test]
+    fn missing_required_field_reports_field_error() {
+        let mut value = job("source", "sink");
+        value.as_object_mut().unwrap().remove("sink");
+        let error = JobConfig::parse_value(value).unwrap_err().to_string();
+        assert!(error.contains("config.parse.field"));
+        assert!(error.contains("sink"));
+    }
+}

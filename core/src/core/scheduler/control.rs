@@ -146,10 +146,9 @@ pub fn load_job_config_from_path(
         message: format!("File not found: {} ({})", path.display(), e),
     })?;
 
-    let config: JobConfig =
-        serde_json::from_str(&data).map_err(|e| SchedulerError::InvalidConfig {
-            message: format!("Parse failed: {}", e),
-        })?;
+    let config = JobConfig::parse_json(&data).map_err(|e| SchedulerError::InvalidConfig {
+        message: format!("Parse failed: {}", e),
+    })?;
 
     let job_id = config
         .job_id
@@ -175,6 +174,7 @@ pub fn load_job_config_from_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn scheduler_error_messages_are_structured() {
@@ -193,5 +193,25 @@ mod tests {
             .message(),
             "Max concurrency reached (3/3)."
         );
+    }
+
+    #[test]
+    fn scheduler_loader_uses_job_config_compatibility_parser() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "{}",
+            serde_json::json!({
+                "input":{"name":"source","type":"api","config":{}},
+                "output":{"name":"sink","type":"database","config":{}},
+                "column_mapping":{},
+                "column_types":null
+            })
+        )
+        .unwrap();
+
+        let (_, config, _) = load_job_config_from_path(&file.path().to_path_buf()).unwrap();
+        assert_eq!(config.source.name, "source");
+        assert_eq!(config.sink.name, "sink");
     }
 }

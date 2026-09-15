@@ -8,7 +8,8 @@ use super::cron::CronTracker;
 use super::repl::ReplLoop;
 use super::task_slot::{TaskPhase, TaskSlot};
 use crate::core::engine::contracts::{RunResult, RunStatus};
-use crate::core::serve::start_task;
+use crate::core::engine::coordinator::CoordinatorService;
+use crate::core::serve::start_task_with_coordinator;
 use anyhow::Result;
 use relus_common::job_config::{JobConfig, SyncMode};
 use std::any::Any;
@@ -23,6 +24,7 @@ use tracing::{info, warn};
 const MAX_CONCURRENCY: usize = 64;
 
 pub struct TaskScheduler {
+    coordinator: Arc<CoordinatorService>,
     slots: HashMap<String, TaskSlot>,
     configs: HashMap<String, (Arc<JobConfig>, bool, String)>,
     done_rx: mpsc::Receiver<TaskDoneEvent>,
@@ -39,10 +41,19 @@ pub struct TaskScheduler {
 
 impl TaskScheduler {
     pub fn new(checkpoint_path: PathBuf) -> Result<Self> {
+        // Compatibility constructor for callers that do not own the application container.
+        Self::new_with_coordinator(checkpoint_path, crate::application_coordinator())
+    }
+
+    pub fn new_with_coordinator(
+        checkpoint_path: PathBuf,
+        coordinator: Arc<CoordinatorService>,
+    ) -> Result<Self> {
         let (done_tx, done_rx) = mpsc::channel(256);
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let checkpoint = CheckpointStore::open(&checkpoint_path)?;
         Ok(Self {
+            coordinator,
             slots: HashMap::new(),
             configs: HashMap::new(),
             done_rx,
@@ -220,7 +231,7 @@ impl TaskScheduler {
         }
 
         let is_cdc = config.sync_mode == Some(SyncMode::Incremental);
-        let job_id = self.next_run_job_id(&job_name);
+        let job_id = self.next_job_run_id(&job_name);
         self.configs.insert(
             job_id.clone(),
             (Arc::clone(&config), is_cdc, job_name.clone()),
@@ -276,9 +287,12 @@ impl TaskScheduler {
         let done_tx = self.done_tx.clone();
         let id = job_id.clone();
         let token_clone = cancel_token.clone();
+        let coordinator = Arc::clone(&self.coordinator);
 
         tokio::spawn(async move {
-            let run_handle = tokio::spawn(async move { start_task(config, token_clone).await });
+            let run_handle = tokio::spawn(async move {
+                start_task_with_coordinator(config, token_clone, coordinator).await
+            });
             let done_result = match run_handle.await {
                 Ok(result) => task_result_to_done(result),
                 Err(error) => TaskDoneResult::Failed(join_error_message(error)),
@@ -407,7 +421,7 @@ impl TaskScheduler {
             .map(|slot| slot.job_id.clone())
     }
 
-    fn next_run_job_id(&self, job_name: &str) -> String {
+    fn next_job_run_id(&self, job_name: &str) -> String {
         let base = sanitize_job_id_base(job_name);
         let now = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
         let candidate = format!("{}-{}", base, now);
@@ -566,7 +580,13 @@ mod tests {
 
     fn scheduler() -> TaskScheduler {
         let dir = tempfile::tempdir().expect("temp dir");
-        TaskScheduler::new(dir.path().join("checkpoints.redb")).expect("scheduler")
+        TaskScheduler::new_with_coordinator(
+            dir.path().join("checkpoints.redb"),
+            Arc::new(CoordinatorService::new(
+                crate::core::engine::state::StateRepository::new(),
+            )),
+        )
+        .expect("scheduler")
     }
 
     fn job_config(sync_mode: Option<SyncMode>) -> Arc<JobConfig> {
@@ -578,7 +598,7 @@ mod tests {
             writer_mode: None,
             config: serde_json::json!({}),
         };
-        let target = DataSourceConfig {
+        let sink = DataSourceConfig {
             name: "target".to_string(),
             source_type: "api".to_string(),
             is_table_mode: true,
@@ -589,7 +609,7 @@ mod tests {
 
         Arc::new(JobConfig {
             source,
-            target,
+            sink,
             column_mapping: BTreeMap::new(),
             column_types: None,
             sync_mode,

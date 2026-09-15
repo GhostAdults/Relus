@@ -127,7 +127,7 @@ impl ReaderRegistry {
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Arc<dyn DataReader>,Error> {
+    ) -> Result<Arc<dyn DataReader>, Error> {
         let creators = self
             .creators
             .read()

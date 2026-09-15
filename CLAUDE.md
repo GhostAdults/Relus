@@ -389,3 +389,17 @@ let result = checker.check(old_schema.as_ref(), &schema);
 2. **自定义类型映射**：通过配置 `column_types` 指定类型提示
 3. **添加新数据源探测器**：实现 `MetadataDiscoverer` trait
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository; read root `CONTEXT.md` and `docs/adr/` when present. See `docs/agents/domain.md`.
+

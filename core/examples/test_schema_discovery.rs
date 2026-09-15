@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
                 }
             }),
         },
-        target: relus_common::data_source_config::DataSourceConfig {
+        sink: relus_common::data_source_config::DataSourceConfig {
             name: "dummy_target".to_string(),
             source_type: "database".to_string(),
             is_table_mode: true,

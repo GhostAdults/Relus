@@ -1,7 +1,5 @@
 use crate::metadata::{ColMeta, TableMeta};
-use crate::pool::{
-    detect_database_kind, get_db_pool, get_db_pool_by_key, DatabaseKind, RdbmsPool,
-};
+use crate::pool::{detect_database_kind, get_db_pool, get_db_pool_by_key, DatabaseKind, RdbmsPool};
 use anyhow::{bail, Context, Result};
 use sqlx::Row as _;
 use tracing::info;
@@ -17,10 +15,7 @@ impl RdbmsConnector {
         let kind = detect_database_kind(url, None)?;
         let (pool_key, _) = get_db_pool(url, kind, 5, None, None).await?;
         info!("[RdbmsConnector] 已连接 {}", database_kind_name(kind));
-        Ok(Self {
-            pool_key,
-            kind,
-        })
+        Ok(Self { pool_key, kind })
     }
 
     pub fn db_type(&self) -> &str {

@@ -13,7 +13,7 @@ use crate::server::SharedState;
 
 #[derive(Deserialize)]
 pub struct SyncReq {
-    pub config: JobConfig,
+    pub config: Value,
     pub mapping: Option<MappingConfig>,
 }
 
@@ -37,7 +37,14 @@ pub async fn h_sync(
     State(state): State<SharedState>,
     Json(body): Json<SyncReq>,
 ) -> (StatusCode, Json<ApiResp<Value>>) {
-    sync_command(state, body.config, body.mapping).await
+    match parse_sync_config(body.config) {
+        Ok(config) => sync_command(state, config, body.mapping).await,
+        Err(error) => api_value_error(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+fn parse_sync_config(config: Value) -> anyhow::Result<JobConfig> {
+    JobConfig::parse_value(config)
 }
 
 pub async fn h_describe(Query(q): Query<DescribeQuery>) -> (StatusCode, Json<ApiResp<Vec<Value>>>) {
@@ -132,10 +139,10 @@ pub async fn sync_command(
         cfg.column_mapping = mapping.column_mapping;
         cfg.column_types = Some(mapping.column_types);
         if let Some(m) = mapping.mode {
-            cfg.target.writer_mode = Some(m);
+            cfg.sink.writer_mode = Some(m);
         }
         if let Some(k) = mapping.key_columns {
-            if let Some(obj) = cfg.target.config.as_object_mut() {
+            if let Some(obj) = cfg.sink.config.as_object_mut() {
                 obj.insert("key_columns".to_string(), serde_json::json!(k));
             }
         }
@@ -291,4 +298,22 @@ fn api_error<T>(status: StatusCode, error: String) -> (StatusCode, Json<ApiResp<
 
 fn api_value_error(status: StatusCode, error: String) -> (StatusCode, Json<ApiResp<Value>>) {
     api_error(status, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_config_uses_job_config_compatibility_parser() {
+        let config = parse_sync_config(serde_json::json!({
+            "input":{"name":"source","type":"api","config":{}},
+            "output":{"name":"sink","type":"database","config":{}},
+            "column_mapping":{},
+            "column_types":null
+        }))
+        .unwrap();
+        assert_eq!(config.source.name, "source");
+        assert_eq!(config.sink.name, "sink");
+    }
 }

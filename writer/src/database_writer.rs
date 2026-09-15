@@ -39,7 +39,7 @@ impl DatabaseJob {
     }
 
     fn build_rdbms_config(&self) -> Result<RdbmsConfig> {
-        let db_config = self.original_config.target.parse_database_config()?;
+        let db_config = self.original_config.sink.parse_database_config()?;
 
         let mode = WriteMode::from_config(&self.original_config);
 
@@ -75,7 +75,7 @@ impl DataWriterJob for DatabaseWriter {
         rdbms_writer.split(writer_threads).await
     }
     fn description(&self) -> String {
-        self.job.original_config.target.name.to_string()
+        self.job.original_config.sink.name.to_string()
     }
 }
 

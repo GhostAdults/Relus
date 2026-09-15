@@ -84,7 +84,7 @@ pub async fn get_pool_from_config(cfg: &JobConfig) -> Result<Arc<RdbmsPool>> {
 
 /// Get database pool from JobConfig target
 pub async fn get_pool_from_output(cfg: &JobConfig) -> Result<Arc<RdbmsPool>> {
-    get_pool_for(&cfg.target).await
+    get_pool_for(&cfg.sink).await
 }
 
 /// Build query SQL with LIMIT and OFFSET

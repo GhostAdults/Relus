@@ -2,8 +2,6 @@ use clap::Parser;
 use relus_core::core::cli::{run_cli, Cli};
 use std::process::ExitCode;
 
-
-
 /// 数据同步 cli 入口
 fn main() -> ExitCode {
     let cli: Cli = Cli::parse();
@@ -29,7 +27,10 @@ fn main() -> ExitCode {
         }
     };
 
-    match runtime.block_on(run_cli(cli.command)) {
+    match runtime.block_on(async {
+        let _ = relus_core::application_state();
+        run_cli(cli.command).await
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{}", e);

@@ -104,7 +104,7 @@ impl WriterRegistry {
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Arc<dyn DataWriter>,Error> {
+    ) -> Result<Arc<dyn DataWriter>, Error> {
         let creators = self
             .creators
             .read()
