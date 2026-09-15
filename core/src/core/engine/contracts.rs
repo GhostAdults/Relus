@@ -47,11 +47,17 @@ impl EngineResultStore {
     }
 
     pub fn complete(&self, result: EngineExecutionResult) {
+        if self.result().is_some() || self.error().is_some() {
+            return;
+        }
         *self.result.write() = Some(result);
         self.notify.notify_waiters();
     }
 
     pub fn fail(&self, error: impl Into<String>) {
+        if self.result().is_some() || self.error().is_some() {
+            return;
+        }
         *self.error.write() = Some(error.into());
         self.notify.notify_waiters();
     }
@@ -123,7 +129,7 @@ impl JobHandle {
     }
 
     pub fn cancel(&self) -> bool {
-        if self.completion.result().is_some() {
+        if self.completion.result().is_some() || self.completion.error().is_some() {
             return false;
         }
         self.cancellation.cancel();
@@ -181,6 +187,14 @@ mod tests {
         store.complete(result());
         assert!(!handle.cancel());
         assert_eq!(handle.wait().await.unwrap().records_written, 3);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_failure_is_rejected() {
+        let (handle, store) = test_job_handle(StateRepository::new());
+        store.fail("failed");
+        assert!(!handle.cancel());
+        assert_eq!(handle.wait().await.unwrap_err(), "failed");
     }
 
     #[test]
