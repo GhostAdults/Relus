@@ -17,8 +17,16 @@ use tokio_util::sync::CancellationToken;
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
-    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult};
+    use futures::stream;
+    use relus_common::{
+        job_config::{JobConfig, WriteMode},
+        PipelineMessage,
+    };
+    use relus_reader::{
+        DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult, StreamMode,
+    };
+    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct EmptyReader;
     #[async_trait]
@@ -83,6 +91,242 @@ mod tests {
         let result = handle.wait().await.unwrap();
         assert_eq!(result.status, EngineExecutionStatus::Succeeded);
         assert_eq!(handle.state(), Some(JobState::SUCCEEDED));
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReadBehavior {
+        Success,
+        Pending,
+    }
+    struct FakeReader {
+        behavior: ReadBehavior,
+        splits: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl DataReaderJob for FakeReader {
+        async fn split(&self, _: usize) -> Result<SplitReaderResult> {
+            self.splits.fetch_add(1, Ordering::SeqCst);
+            panic!("prepared plans must not split readers")
+        }
+        fn description(&self) -> String {
+            "fake".into()
+        }
+    }
+    #[async_trait]
+    impl DataReaderTask for FakeReader {
+        async fn read_data(&self, _: &ReadTask) -> Result<JsonStream> {
+            Ok(match self.behavior {
+                ReadBehavior::Success => {
+                    Box::pin(stream::iter(vec![Ok(serde_json::json!({"v": 1}))]))
+                }
+                ReadBehavior::Pending => Box::pin(stream::pending()),
+            })
+        }
+    }
+    struct FakeWriter {
+        split_failure: bool,
+        write_failure: bool,
+        writes: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl DataWriterJob for FakeWriter {
+        async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+            if self.split_failure {
+                return Err(anyhow!("fake initialization failure"));
+            }
+            let config = Arc::new(JobConfig::parse_json(
+                r#"{"source":{"name":"s","type":"x","config":{}},"target":{"name":"t","type":"x","config":{}},"column_mapping":{}}"#,
+            )?);
+            Ok(SplitWriterResult {
+                tasks: vec![WriteTask {
+                    task_id: 0,
+                    config,
+                    mode: WriteMode::Insert,
+                    use_transaction: false,
+                    batch_size: 1,
+                }],
+            })
+        }
+        fn description(&self) -> String {
+            "fake".into()
+        }
+    }
+    #[async_trait]
+    impl DataWriterTask for FakeWriter {
+        async fn write_data(
+            &self,
+            _: WriteTask,
+            mut rx: tokio::sync::mpsc::Receiver<PipelineMessage>,
+        ) -> Result<usize> {
+            if self.write_failure {
+                return Err(anyhow!("fake execution failure"));
+            }
+            let mut written = 0;
+            while let Some(message) = rx.recv().await {
+                if let PipelineMessage::DataBatch(rows) = message {
+                    written += rows.len();
+                }
+            }
+            self.writes.fetch_add(written, Ordering::SeqCst);
+            Ok(written)
+        }
+    }
+    fn fake_plan(
+        behavior: ReadBehavior,
+        split_failure: bool,
+        write_failure: bool,
+        splits: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+    ) -> crate::core::planner::ExecutionPlan {
+        crate::core::planner::ExecutionPlan {
+            reader: Arc::new(FakeReader { behavior, splits }),
+            writer: Arc::new(FakeWriter {
+                split_failure,
+                write_failure,
+                writes,
+            }),
+            pipeline: Default::default(),
+            record_builder: Arc::new(
+                crate::pipeline::RecordBuilder::new(std::collections::BTreeMap::new(), None)
+                    .unwrap(),
+            ),
+            reader_split: SplitReaderResult {
+                total_records: 1,
+                tasks: vec![ReadTask {
+                    task_id: 0,
+                    conn: serde_json::json!({}),
+                    query_sql: None,
+                    offset: 0,
+                    limit: 1,
+                }],
+                stream_mode: StreamMode::Batch,
+            },
+            stream_mode: StreamMode::Batch,
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_executes_prepared_plan_and_repeated_wait_is_stable() {
+        let splits = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let coordinator = CoordinatorService::new(StateRepository::new());
+        let handle = coordinator
+            .submit_job(fake_plan(
+                ReadBehavior::Success,
+                false,
+                false,
+                splits.clone(),
+                writes.clone(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            handle.state(),
+            Some(
+                JobState::SUBMITTED
+                    | JobState::INITIALIZING
+                    | JobState::RUNNING
+                    | JobState::SUCCEEDED
+            )
+        ));
+        let first = handle.wait().await.unwrap();
+        let second = handle.wait().await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.status, EngineExecutionStatus::Succeeded);
+        assert_eq!((first.records_read, first.records_written), (1, 1));
+        assert_eq!(splits.load(Ordering::SeqCst), 0);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        let snapshot = handle.snapshot().unwrap();
+        assert_eq!(snapshot.job.state, JobState::SUCCEEDED);
+        assert!(snapshot
+            .task_groups
+            .iter()
+            .all(|group| group.state == super::super::state::TaskGroupState::SUCCEEDED));
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == super::super::state::TaskState::SUCCEEDED));
+        assert_eq!(snapshot.result, Some(first));
+    }
+
+    #[tokio::test]
+    async fn initialization_failure_is_saved_in_snapshot() {
+        let coordinator = CoordinatorService::new(StateRepository::new());
+        let handle = coordinator
+            .submit_job(fake_plan(
+                ReadBehavior::Success,
+                true,
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .unwrap();
+        let result = handle.wait().await.unwrap();
+        assert_eq!(result.status, EngineExecutionStatus::Failed);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("fake initialization failure"));
+        assert_eq!(handle.state(), Some(JobState::FAILED));
+        assert_eq!(handle.snapshot().unwrap().error, result.error);
+    }
+
+    #[tokio::test]
+    async fn execution_failure_is_saved_and_marks_tree_failed() {
+        let coordinator = CoordinatorService::new(StateRepository::new());
+        let handle = coordinator
+            .submit_job(fake_plan(
+                ReadBehavior::Success,
+                false,
+                true,
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .unwrap();
+        let result = handle.wait().await.unwrap();
+        assert_eq!(result.status, EngineExecutionStatus::Failed);
+        assert_eq!(handle.state(), Some(JobState::FAILED));
+        let snapshot = handle.snapshot().unwrap();
+        assert!(snapshot
+            .task_groups
+            .iter()
+            .all(|group| group.state == super::super::state::TaskGroupState::FAILED));
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == super::super::state::TaskState::FAILED));
+    }
+
+    #[tokio::test]
+    async fn cancellation_propagates_and_saves_shutdown_result() {
+        let coordinator = CoordinatorService::new(StateRepository::new());
+        let handle = coordinator
+            .submit_job(fake_plan(
+                ReadBehavior::Pending,
+                false,
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .unwrap();
+        while handle.state() != Some(JobState::RUNNING) {
+            tokio::task::yield_now().await;
+        }
+        assert!(handle.cancel());
+        let result = handle.wait().await.unwrap();
+        assert_eq!(result.status, EngineExecutionStatus::Cancelled);
+        assert_eq!(result.error.as_deref(), Some("Shutdown"));
+        assert_eq!(handle.state(), Some(JobState::CANCELLED));
+        assert!(!handle.cancel());
+        let snapshot = handle.snapshot().unwrap();
+        assert!(snapshot
+            .task_groups
+            .iter()
+            .all(|group| group.state == super::super::state::TaskGroupState::CANCELLED));
+        assert!(snapshot
+            .tasks
+            .iter()
+            .all(|task| task.state == super::super::state::TaskState::CANCELLED));
     }
 }
 
@@ -284,6 +528,7 @@ impl CoordinatorService {
                 Err(error) => {
                     let message = error.to_string();
                     let cancelled = token.is_cancelled();
+                    token.cancel();
                     finish(
                         self,
                         if cancelled {
@@ -349,13 +594,13 @@ impl CoordinatorService {
                 }),
             }
         }
-        let cancelled = token.is_cancelled() || results.iter().any(|r| r.cancelled);
         let failed = results.iter().any(|r| {
             matches!(
                 r.status,
                 super::task_execution::TaskGroupExecutionStatus::Failed
             )
         });
+        let cancelled = !failed && (token.is_cancelled() || results.iter().any(|r| r.cancelled));
         let state = if cancelled {
             JobState::CANCELLED
         } else if failed {
@@ -471,6 +716,16 @@ impl CoordinatorService {
         self.repository.job(id)
     }
     pub fn cancel_job(&self, id: JobId) -> Result<bool> {
+        if let Some(job) = self.repository.job(id) {
+            if !matches!(
+                job.state,
+                JobState::SUBMITTED | JobState::INITIALIZING | JobState::RUNNING
+            ) {
+                return Ok(false);
+            }
+        } else {
+            return Err(anyhow!("job not found"));
+        }
         let token = self
             .jobs
             .read()
@@ -478,14 +733,6 @@ impl CoordinatorService {
             .cloned()
             .ok_or_else(|| anyhow!("job not found"))?;
         token.cancel();
-        if let Some(job) = self.repository.job(id) {
-            if matches!(
-                job.state,
-                JobState::SUBMITTED | JobState::INITIALIZING | JobState::RUNNING
-            ) {
-                let _ = self.repository.update_job(id, JobState::CANCELLED);
-            }
-        }
         Ok(true)
     }
 }

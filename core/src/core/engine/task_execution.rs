@@ -33,10 +33,10 @@ impl TaskGroupExecutionResult {
         group_id: super::state::TaskGroupId,
         stats: crate::pipeline::PreparedGroupStats,
     ) -> Self {
-        let status = if stats.shutdown {
-            TaskGroupExecutionStatus::Cancelled
-        } else if stats.error.is_some() {
+        let status = if stats.error.is_some() {
             TaskGroupExecutionStatus::Failed
+        } else if stats.shutdown {
+            TaskGroupExecutionStatus::Cancelled
         } else {
             TaskGroupExecutionStatus::Succeeded
         };
@@ -46,7 +46,7 @@ impl TaskGroupExecutionResult {
             records_read: stats.total_read,
             records_written: stats.total_written,
             records_failed: stats.total_read.saturating_sub(stats.total_written),
-            cancelled: stats.shutdown,
+            cancelled: matches!(status, TaskGroupExecutionStatus::Cancelled),
             error_summary: stats.error,
             elapsed: stats.elapsed,
         }
