@@ -135,17 +135,22 @@ impl CoordinatorService {
         let started = Instant::now();
         let store = self.results.read().get(&id).cloned();
         let finish = |this: &CoordinatorService,
-                      result: EngineExecutionResult,
+                      state: JobState,
+                      mut result: EngineExecutionResult,
                       store: Option<EngineResultStore>| {
+            if let Err(error) = this.transition_job(id, state) {
+                result.status = EngineExecutionStatus::Failed;
+                result.cancelled = false;
+                result.error = Some(format!("failed to persist job lifecycle: {error}"));
+            }
             if let Some(store) = store {
                 store.complete(result);
             }
-            this.results.write().remove(&id);
         };
         if token.is_cancelled() {
-            let _ = self.repository.update_job(id, JobState::CANCELLED);
             finish(
                 self,
+                JobState::CANCELLED,
                 EngineExecutionResult {
                     status: EngineExecutionStatus::Cancelled,
                     records_read: 0,
@@ -159,21 +164,35 @@ impl CoordinatorService {
             );
             return;
         }
-        let _ = self.repository.update_job(id, JobState::INITIALIZING);
+        if let Err(error) = self.transition_job(id, JobState::INITIALIZING) {
+            finish(
+                self,
+                JobState::FAILED,
+                EngineExecutionResult {
+                    status: EngineExecutionStatus::Failed,
+                    records_read: 0,
+                    records_written: 0,
+                    records_failed: 0,
+                    cancelled: false,
+                    elapsed: started.elapsed(),
+                    error: Some(format!("failed to initialize job lifecycle: {error}")),
+                },
+                store,
+            );
+            return;
+        }
         let runtime = match self.master.build_with_job_id(plan, id).await {
             Ok(runtime) => runtime,
             Err(error) => {
                 let message = error.to_string();
-                let _ = self.repository.update_job(
-                    id,
-                    if token.is_cancelled() {
-                        JobState::CANCELLED
-                    } else {
-                        JobState::FAILED
-                    },
-                );
+                let terminal = if token.is_cancelled() {
+                    JobState::CANCELLED
+                } else {
+                    JobState::FAILED
+                };
                 finish(
                     self,
+                    terminal,
                     EngineExecutionResult {
                         status: if token.is_cancelled() {
                             EngineExecutionStatus::Cancelled
@@ -193,9 +212,9 @@ impl CoordinatorService {
             }
         };
         if token.is_cancelled() {
-            let _ = self.repository.update_job(id, JobState::CANCELLED);
             finish(
                 self,
+                JobState::CANCELLED,
                 EngineExecutionResult {
                     status: EngineExecutionStatus::Cancelled,
                     records_read: 0,
@@ -210,20 +229,31 @@ impl CoordinatorService {
             return;
         }
         if runtime.groups.is_empty() {
-            let _ = self.repository.update_job(
-                id,
-                if token.is_cancelled() {
-                    JobState::CANCELLED
-                } else {
-                    JobState::RUNNING
-                },
-            );
             let cancelled = token.is_cancelled();
-            if !cancelled {
-                let _ = self.repository.update_job(id, JobState::SUCCEEDED);
+            if !cancelled && self.transition_job(id, JobState::RUNNING).is_err() {
+                finish(
+                    self,
+                    JobState::FAILED,
+                    EngineExecutionResult {
+                        status: EngineExecutionStatus::Failed,
+                        records_read: 0,
+                        records_written: 0,
+                        records_failed: 0,
+                        cancelled: false,
+                        elapsed: started.elapsed(),
+                        error: Some("failed to persist RUNNING lifecycle".into()),
+                    },
+                    store,
+                );
+                return;
             }
             finish(
                 self,
+                if cancelled {
+                    JobState::CANCELLED
+                } else {
+                    JobState::SUCCEEDED
+                },
                 EngineExecutionResult {
                     status: if cancelled {
                         EngineExecutionStatus::Cancelled
@@ -253,17 +283,30 @@ impl CoordinatorService {
                 Ok(handle) => handles.push(handle),
                 Err(error) => {
                     let message = error.to_string();
-                    let _ = self.repository.update_job(id, JobState::FAILED);
+                    let cancelled = token.is_cancelled();
                     finish(
                         self,
+                        if cancelled {
+                            JobState::CANCELLED
+                        } else {
+                            JobState::FAILED
+                        },
                         EngineExecutionResult {
-                            status: EngineExecutionStatus::Failed,
+                            status: if cancelled {
+                                EngineExecutionStatus::Cancelled
+                            } else {
+                                EngineExecutionStatus::Failed
+                            },
                             records_read: 0,
                             records_written: 0,
                             records_failed: 0,
-                            cancelled: false,
+                            cancelled,
                             elapsed: started.elapsed(),
-                            error: Some(message),
+                            error: Some(if cancelled {
+                                "Shutdown".into()
+                            } else {
+                                message
+                            }),
                         },
                         store,
                     );
@@ -271,7 +314,24 @@ impl CoordinatorService {
                 }
             }
         }
-        let _ = self.repository.update_job(id, JobState::RUNNING);
+        if let Err(error) = self.transition_job(id, JobState::RUNNING) {
+            token.cancel();
+            finish(
+                self,
+                JobState::FAILED,
+                EngineExecutionResult {
+                    status: EngineExecutionStatus::Failed,
+                    records_read: 0,
+                    records_written: 0,
+                    records_failed: 0,
+                    cancelled: false,
+                    elapsed: started.elapsed(),
+                    error: Some(format!("failed to persist RUNNING lifecycle: {error}")),
+                },
+                store,
+            );
+            return;
+        }
         let mut results = Vec::new();
         for handle in handles {
             let group_id = handle.group_id();
@@ -303,10 +363,10 @@ impl CoordinatorService {
         } else {
             JobState::SUCCEEDED
         };
-        let _ = self.repository.update_job(id, state);
         let error = results.iter().find_map(|r| r.error_summary.clone());
         finish(
             self,
+            state,
             EngineExecutionResult {
                 status: if cancelled {
                     EngineExecutionStatus::Cancelled
@@ -328,6 +388,17 @@ impl CoordinatorService {
             },
             store,
         );
+    }
+
+    fn transition_job(&self, id: JobId, state: JobState) -> Result<()> {
+        if self
+            .repository
+            .job(id)
+            .is_some_and(|job| job.state == state)
+        {
+            return Ok(());
+        }
+        self.repository.update_job(id, state).map_err(Into::into)
     }
 
     /// Register and synchronously execute a plan for compatibility callers.

@@ -36,8 +36,7 @@ pub struct JobSnapshot {
 
 #[derive(Clone, Default)]
 pub struct EngineResultStore {
-    result: Arc<RwLock<Option<EngineExecutionResult>>>,
-    error: Arc<RwLock<Option<String>>>,
+    completion: Arc<RwLock<Option<Result<EngineExecutionResult, String>>>>,
     notify: Arc<Notify>,
 }
 
@@ -47,26 +46,32 @@ impl EngineResultStore {
     }
 
     pub fn complete(&self, result: EngineExecutionResult) {
-        if self.result().is_some() || self.error().is_some() {
-            return;
+        let mut completion = self.completion.write();
+        if completion.is_none() {
+            *completion = Some(Ok(result));
+            self.notify.notify_waiters();
         }
-        *self.result.write() = Some(result);
-        self.notify.notify_waiters();
     }
 
     pub fn fail(&self, error: impl Into<String>) {
-        if self.result().is_some() || self.error().is_some() {
-            return;
+        let mut completion = self.completion.write();
+        if completion.is_none() {
+            *completion = Some(Err(error.into()));
+            self.notify.notify_waiters();
         }
-        *self.error.write() = Some(error.into());
-        self.notify.notify_waiters();
     }
 
     pub fn result(&self) -> Option<EngineExecutionResult> {
-        self.result.read().clone()
+        self.completion
+            .read()
+            .as_ref()
+            .and_then(|value| value.as_ref().ok().cloned())
     }
     pub fn error(&self) -> Option<String> {
-        self.error.read().clone()
+        self.completion
+            .read()
+            .as_ref()
+            .and_then(|value| value.as_ref().err().cloned())
     }
     async fn wait(&self) -> Result<EngineExecutionResult, String> {
         loop {
