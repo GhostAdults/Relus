@@ -128,6 +128,29 @@ mod tests {
         write_failure: bool,
         writes: Arc<AtomicUsize>,
     }
+    struct BlockingInitWriter {
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl DataWriterJob for BlockingInitWriter {
+        async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+            self.release.notified().await;
+            Err(anyhow!("released initialization"))
+        }
+        fn description(&self) -> String {
+            "blocking-init".into()
+        }
+    }
+    #[async_trait]
+    impl DataWriterTask for BlockingInitWriter {
+        async fn write_data(
+            &self,
+            _: WriteTask,
+            _: tokio::sync::mpsc::Receiver<PipelineMessage>,
+        ) -> Result<usize> {
+            unreachable!()
+        }
+    }
     #[async_trait]
     impl DataWriterJob for FakeWriter {
         async fn split(&self, _: usize) -> Result<SplitWriterResult> {
@@ -246,6 +269,33 @@ mod tests {
             .iter()
             .all(|task| task.state == super::super::state::TaskState::SUCCEEDED));
         assert_eq!(snapshot.result, Some(first));
+    }
+
+    #[tokio::test]
+    async fn submit_returns_before_initialization_completes() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut plan = fake_plan(
+            ReadBehavior::Success,
+            false,
+            false,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        plan.writer = Arc::new(BlockingInitWriter {
+            release: release.clone(),
+        });
+        let coordinator = CoordinatorService::new(StateRepository::new());
+        let handle = coordinator.submit_job(plan).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), handle.wait())
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        assert_eq!(
+            handle.wait().await.unwrap().status,
+            EngineExecutionStatus::Failed
+        );
     }
 
     #[tokio::test]

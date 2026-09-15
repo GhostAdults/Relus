@@ -6,6 +6,7 @@ use super::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +70,7 @@ pub enum TaskOutcome {
 struct StateObserver {
     repository: StateRepository,
     task_ids: Vec<TaskId>,
+    errors: Arc<Mutex<Vec<String>>>,
 }
 #[async_trait]
 impl TaskLifecycleObserver for StateObserver {
@@ -76,6 +78,9 @@ impl TaskLifecycleObserver for StateObserver {
         if let Some(id) = self.task_ids.get(index) {
             if let Err(error) = self.repository.update_task(*id, TaskState::RUNNING) {
                 tracing::error!(task_id = %id, %error, "failed to persist task RUNNING state");
+                self.errors
+                    .lock()
+                    .push(format!("task {id} RUNNING: {error}"));
             }
         }
     }
@@ -88,6 +93,9 @@ impl TaskLifecycleObserver for StateObserver {
             };
             if let Err(error) = self.repository.update_task(*id, state) {
                 tracing::error!(task_id = %id, %error, "failed to persist terminal task state");
+                self.errors
+                    .lock()
+                    .push(format!("task {id} terminal state: {error}"));
             }
         }
     }
@@ -122,15 +130,18 @@ impl TaskExecutionService {
             self.repository
                 .update_task(task.task.id, TaskState::INITIALIZING)?;
         }
+        let lifecycle_errors = Arc::new(Mutex::new(Vec::new()));
         let observer: Arc<dyn TaskLifecycleObserver> = Arc::new(StateObserver {
             repository: self.repository.clone(),
             task_ids: group.tasks.iter().map(|t| t.task.id).collect(),
+            errors: lifecycle_errors.clone(),
         });
         let task_ids: Vec<TaskId> = group.tasks.iter().map(|t| t.task.id).collect();
         let task_ids_for_future = task_ids.clone();
         let repo = self.repository.clone();
         let group_id = group.group.id;
         let cancel_for_task = cancel.clone();
+        let lifecycle_errors_for_future = lifecycle_errors.clone();
         let fut = Box::pin(async move {
             if group.tasks.is_empty() {
                 repo.update_task_group(group_id, TaskGroupState::RUNNING)
@@ -160,16 +171,9 @@ impl TaskExecutionService {
                     };
                     if let Err(error) = repo.update_task_group(group_id, state) {
                         tracing::error!(%group_id, %error, "failed to persist terminal group state");
-                    }
-                    let task_state = match r.status {
-                        TaskGroupExecutionStatus::Succeeded => TaskState::SUCCEEDED,
-                        TaskGroupExecutionStatus::Failed => TaskState::FAILED,
-                        TaskGroupExecutionStatus::Cancelled => TaskState::CANCELLED,
-                    };
-                    for id in &task_ids_for_future {
-                        if let Err(error) = repo.update_task(*id, task_state) {
-                            tracing::error!(task_id = %id, %error, "failed to persist terminal task state");
-                        }
+                        lifecycle_errors_for_future
+                            .lock()
+                            .push(format!("group {group_id} terminal state: {error}"));
                     }
                 }
                 Err(_) => {
@@ -180,6 +184,9 @@ impl TaskExecutionService {
                     };
                     if let Err(error) = repo.update_task_group(group_id, state) {
                         tracing::error!(%group_id, %error, "failed to persist failed group state");
+                        lifecycle_errors_for_future
+                            .lock()
+                            .push(format!("group {group_id} failure state: {error}"));
                     }
                     let task_state = if cancel_for_task.is_cancelled() {
                         TaskState::CANCELLED
@@ -187,31 +194,67 @@ impl TaskExecutionService {
                         TaskState::FAILED
                     };
                     for id in &task_ids_for_future {
+                        if repo.task(*id).is_some_and(|task| task.state == task_state) {
+                            continue;
+                        }
                         if let Err(error) = repo.update_task(*id, task_state) {
                             tracing::error!(task_id = %id, %error, "failed to persist failed task state");
+                            lifecycle_errors_for_future
+                                .lock()
+                                .push(format!("task {id} failure state: {error}"));
                         }
                     }
                 }
             }
-            result
+            let lifecycle_error = lifecycle_errors_for_future.lock().join("; ");
+            if lifecycle_error.is_empty() {
+                result
+            } else {
+                match result {
+                    Ok(mut result) => {
+                        result.status = TaskGroupExecutionStatus::Failed;
+                        result.cancelled = false;
+                        result.error_summary = Some(match result.error_summary {
+                            Some(error) => {
+                                format!("{error}; lifecycle persistence: {lifecycle_error}")
+                            }
+                            None => format!("lifecycle persistence: {lifecycle_error}"),
+                        });
+                        Ok(result)
+                    }
+                    Err(error) => {
+                        Err(error.context(format!("lifecycle persistence: {lifecycle_error}")))
+                    }
+                }
+            }
         });
         match self.runtime.submit(group_id, cancel, fut) {
             Ok(handle) => Ok(handle),
             Err(error) => {
+                let mut persistence_errors = Vec::new();
                 if let Err(state_error) = self
                     .repository
                     .update_task_group(group_id, TaskGroupState::FAILED)
                 {
                     tracing::error!(%group_id, error = %state_error, "failed to persist deployment failure");
+                    persistence_errors.push(format!("group {group_id}: {state_error}"));
                 }
                 for task_id in task_ids {
                     if let Err(state_error) =
                         self.repository.update_task(task_id, TaskState::FAILED)
                     {
                         tracing::error!(%task_id, error = %state_error, "failed to persist task deployment failure");
+                        persistence_errors.push(format!("task {task_id}: {state_error}"));
                     }
                 }
-                Err(error)
+                if persistence_errors.is_empty() {
+                    Err(error)
+                } else {
+                    Err(error.context(format!(
+                        "lifecycle persistence: {}",
+                        persistence_errors.join("; ")
+                    )))
+                }
             }
         }
     }
