@@ -1,5 +1,6 @@
 //! Execution Engine primitives.
 pub mod channel;
+pub mod contracts;
 pub mod coordinator;
 pub mod job_master;
 pub mod runtime;
