@@ -74,7 +74,9 @@ struct StateObserver {
 impl TaskLifecycleObserver for StateObserver {
     async fn deployed(&self, index: usize) {
         if let Some(id) = self.task_ids.get(index) {
-            let _ = self.repository.update_task(*id, TaskState::RUNNING);
+            if let Err(error) = self.repository.update_task(*id, TaskState::RUNNING) {
+                tracing::error!(task_id = %id, %error, "failed to persist task RUNNING state");
+            }
         }
     }
     async fn completed(&self, index: usize, outcome: TaskOutcome) {
@@ -84,7 +86,9 @@ impl TaskLifecycleObserver for StateObserver {
                 TaskOutcome::Failed => TaskState::FAILED,
                 TaskOutcome::Cancelled => TaskState::CANCELLED,
             };
-            let _ = self.repository.update_task(*id, state);
+            if let Err(error) = self.repository.update_task(*id, state) {
+                tracing::error!(task_id = %id, %error, "failed to persist terminal task state");
+            }
         }
     }
 }
@@ -154,14 +158,18 @@ impl TaskExecutionService {
                         TaskGroupExecutionStatus::Failed => TaskGroupState::FAILED,
                         TaskGroupExecutionStatus::Cancelled => TaskGroupState::CANCELLED,
                     };
-                    let _ = repo.update_task_group(group_id, state);
+                    if let Err(error) = repo.update_task_group(group_id, state) {
+                        tracing::error!(%group_id, %error, "failed to persist terminal group state");
+                    }
                     let task_state = match r.status {
                         TaskGroupExecutionStatus::Succeeded => TaskState::SUCCEEDED,
                         TaskGroupExecutionStatus::Failed => TaskState::FAILED,
                         TaskGroupExecutionStatus::Cancelled => TaskState::CANCELLED,
                     };
                     for id in &task_ids_for_future {
-                        let _ = repo.update_task(*id, task_state);
+                        if let Err(error) = repo.update_task(*id, task_state) {
+                            tracing::error!(task_id = %id, %error, "failed to persist terminal task state");
+                        }
                     }
                 }
                 Err(_) => {
@@ -170,14 +178,18 @@ impl TaskExecutionService {
                     } else {
                         TaskGroupState::FAILED
                     };
-                    let _ = repo.update_task_group(group_id, state);
+                    if let Err(error) = repo.update_task_group(group_id, state) {
+                        tracing::error!(%group_id, %error, "failed to persist failed group state");
+                    }
                     let task_state = if cancel_for_task.is_cancelled() {
                         TaskState::CANCELLED
                     } else {
                         TaskState::FAILED
                     };
                     for id in &task_ids_for_future {
-                        let _ = repo.update_task(*id, task_state);
+                        if let Err(error) = repo.update_task(*id, task_state) {
+                            tracing::error!(task_id = %id, %error, "failed to persist failed task state");
+                        }
                     }
                 }
             }
@@ -186,11 +198,18 @@ impl TaskExecutionService {
         match self.runtime.submit(group_id, cancel, fut) {
             Ok(handle) => Ok(handle),
             Err(error) => {
-                let _ = self
+                if let Err(state_error) = self
                     .repository
-                    .update_task_group(group_id, TaskGroupState::FAILED);
+                    .update_task_group(group_id, TaskGroupState::FAILED)
+                {
+                    tracing::error!(%group_id, error = %state_error, "failed to persist deployment failure");
+                }
                 for task_id in task_ids {
-                    let _ = self.repository.update_task(task_id, TaskState::FAILED);
+                    if let Err(state_error) =
+                        self.repository.update_task(task_id, TaskState::FAILED)
+                    {
+                        tracing::error!(%task_id, error = %state_error, "failed to persist task deployment failure");
+                    }
                 }
                 Err(error)
             }

@@ -3,7 +3,7 @@ use super::{
     contracts::{EngineExecutionResult, EngineExecutionStatus, EngineResultStore, JobHandle},
     job_master::JobMaster,
     runtime::{Runtime, TokioRuntime},
-    state::{Job, JobId, JobState, StateRepository, TaskGroupState, TaskState},
+    state::{Job, JobId, JobState, StateRepository, TaskGroupId, TaskGroupState, TaskState},
     task_execution::TaskExecutionService,
     worker::WorkerContext,
 };
@@ -553,6 +553,12 @@ impl CoordinatorService {
                 }
             }
         }
+        if let Some(failure) = deployment_failure.as_mut() {
+            if let Err(error) = self.fail_unstarted_groups(id) {
+                let message = failure.error_summary.get_or_insert_default();
+                message.push_str(&format!("; failed to converge unstarted groups: {error}"));
+            }
+        }
         if deployment_failure.is_none() {
             if let Err(error) = self.transition_job(id, JobState::RUNNING) {
                 token.cancel();
@@ -662,71 +668,62 @@ impl CoordinatorService {
         self.repository.update_job(id, state).map_err(Into::into)
     }
 
-    /// Register and synchronously execute a plan for compatibility callers.
+    fn fail_unstarted_groups(&self, id: JobId) -> Result<()> {
+        for group in self.repository.task_groups(id) {
+            if group.state != TaskGroupState::CREATED {
+                continue;
+            }
+            self.repository
+                .update_task_group(group.id, TaskGroupState::SUBMITTED)?;
+            self.repository
+                .update_task_group(group.id, TaskGroupState::FAILED)?;
+            for task in self.repository.tasks(group.id) {
+                self.repository.update_task(task.id, TaskState::SUBMITTED)?;
+                self.repository.update_task(task.id, TaskState::FAILED)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Compatibility wait adapter used by Runner until its DTO migration in #23.
     pub async fn run_job(
         &self,
         plan: crate::core::planner::ExecutionPlan,
         token: CancellationToken,
     ) -> Result<Vec<TaskGroupExecutionResult>> {
-        let id = JobId::new();
-        self.repository.register_job(Job::new(id))?;
-        self.repository.update_job(id, JobState::SUBMITTED)?;
-        self.execute_job(id, plan, token).await
-    }
-
-    /// Execute a prepared plan and return every TaskGroup result. This is the
-    /// synchronous compatibility seam used by Runner; submit_job remains the
-    /// fire-and-forget API for existing callers.
-    pub async fn execute_job(
-        &self,
-        id: JobId,
-        plan: crate::core::planner::ExecutionPlan,
-        token: CancellationToken,
-    ) -> Result<Vec<TaskGroupExecutionResult>> {
-        if token.is_cancelled() {
-            return Ok(Vec::new());
-        }
-        let _ = self.repository.update_job(id, JobState::INITIALIZING);
-        let runtime = self.master.build_with_job_id(plan, id).await.map_err(|e| {
-            let _ = self.repository.update_job(id, JobState::FAILED);
-            e
-        })?;
-        if runtime.groups.is_empty() {
-            let _ = self.repository.update_job(id, JobState::RUNNING);
-            let _ = self.repository.update_job(id, JobState::SUCCEEDED);
-            return Ok(Vec::new());
-        }
-        let mut handles = Vec::new();
-        for group in runtime.groups {
-            let context = WorkerContext {
-                reader: Arc::clone(&runtime.reader),
-                writer: Arc::clone(&runtime.writer),
-                pipeline: runtime.pipeline.clone(),
-                record_builder: Arc::clone(&runtime.record_builder),
-            };
-            handles.push(self.execution.deploy(group, context, token.clone())?);
-        }
-        let _ = self.repository.update_job(id, JobState::RUNNING);
-        let mut results = Vec::new();
-        for handle in handles {
-            results.push(handle.join().await?);
-        }
-        let cancelled = token.is_cancelled() || results.iter().any(|r| r.cancelled);
-        let failed = results.iter().any(|r| {
-            matches!(
-                r.status,
-                super::task_execution::TaskGroupExecutionStatus::Failed
-            )
-        });
-        let state = if cancelled {
-            JobState::CANCELLED
-        } else if failed {
-            JobState::FAILED
-        } else {
-            JobState::SUCCEEDED
+        let handle = self.submit_job(plan)?;
+        let result = tokio::select! {
+            result = handle.wait() => result.map_err(anyhow::Error::msg)?,
+            _ = token.cancelled() => {
+                handle.cancel();
+                handle.wait().await.map_err(anyhow::Error::msg)?
+            }
         };
-        let _ = self.repository.update_job(id, state);
-        Ok(results)
+        let group_id = handle
+            .snapshot()
+            .and_then(|snapshot| snapshot.task_groups.first().map(|group| group.id))
+            .unwrap_or_else(TaskGroupId::new);
+        let status = match result.status {
+            EngineExecutionStatus::Succeeded => {
+                super::task_execution::TaskGroupExecutionStatus::Succeeded
+            }
+            EngineExecutionStatus::Failed => {
+                super::task_execution::TaskGroupExecutionStatus::Failed
+            }
+            EngineExecutionStatus::Cancelled => {
+                super::task_execution::TaskGroupExecutionStatus::Cancelled
+            }
+        };
+        Ok(vec![TaskGroupExecutionResult {
+            group_id,
+            status,
+            records_read: result.records_read,
+            records_written: result.records_written,
+            records_failed: result.records_failed,
+            cancelled: result.cancelled,
+            error_summary: result.error,
+            elapsed: result.elapsed,
+        }])
     }
     pub fn query_job(&self, id: JobId) -> Option<Job> {
         self.repository.job(id)
