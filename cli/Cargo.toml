@@ -12,16 +12,13 @@ before-packaging-command = "cargo build --release"
 # # 如果有资源文件，也放在这里
 # resources = ["configs/**/*"]
 
-[[bin]]
-name = "relus_cli"
-path = "src/main.rs"
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
-relus_core = { workspace = true }
 relus_common = { workspace = true }
+relus_connector_rdbms = { workspace = true }
 clap = { workspace = true }
-anyhow = { workspace = true }
-tokio = { workspace = true }
 
 [lints]
 workspace = true

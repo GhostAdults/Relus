@@ -56,7 +56,7 @@ pub trait DataWriterTask: Send + Sync {
 /// parent traits, where `async_trait` provides object-safe futures.
 pub trait DataWriter: DataWriterJob + DataWriterTask {}
 
-impl<T: DataWriterJob + DataWriterTask> DataWriter for T {}
+impl<T> DataWriter for T where T: DataWriterJob + DataWriterTask {}
 
 // ==========================================
 // Writer 全局注册表

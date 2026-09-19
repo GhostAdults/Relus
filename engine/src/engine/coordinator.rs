@@ -65,8 +65,8 @@ mod tests {
         }
     }
 
-    fn empty_plan() -> crate::core::planner::ExecutionPlan {
-        crate::core::planner::ExecutionPlan {
+    fn empty_plan() -> crate::logic_planner::ExecutionPlan {
+        crate::logic_planner::ExecutionPlan {
             reader: Arc::new(EmptyReader),
             writer: Arc::new(EmptyWriter),
             pipeline: Default::default(),
@@ -204,8 +204,8 @@ mod tests {
         write_failure: bool,
         splits: Arc<AtomicUsize>,
         writes: Arc<AtomicUsize>,
-    ) -> crate::core::planner::ExecutionPlan {
-        crate::core::planner::ExecutionPlan {
+    ) -> crate::logic_planner::ExecutionPlan {
+        crate::logic_planner::ExecutionPlan {
             reader: Arc::new(FakeReader { behavior, splits }),
             writer: Arc::new(FakeWriter {
                 split_failure,
@@ -410,7 +410,7 @@ impl CoordinatorService {
     pub fn repository(&self) -> &StateRepository {
         &self.repository
     }
-    pub fn submit_job(&self, plan: crate::core::planner::ExecutionPlan) -> Result<JobHandle> {
+    pub fn submit_job(&self, plan: crate::logic_planner::ExecutionPlan) -> Result<JobHandle> {
         let id = JobId::new();
         self.repository.register_job(Job::new(id))?;
         self.repository.update_job(id, JobState::SUBMITTED)?;
@@ -438,7 +438,7 @@ impl CoordinatorService {
     async fn execute_and_store(
         &self,
         id: JobId,
-        plan: crate::core::planner::ExecutionPlan,
+        plan: crate::logic_planner::ExecutionPlan,
         token: CancellationToken,
     ) {
         let started = Instant::now();

@@ -3906,6 +3906,7 @@ dependencies = [
  "relus_common",
  "relus_connector_rdbms",
  "relus_core",
+ "relus_engine",
  "serde",
  "serde_json",
  "sqlx",
@@ -3933,11 +3934,9 @@ dependencies = [
 name = "relus_cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "relus_common",
- "relus_core",
- "tokio",
+ "relus_connector_rdbms",
 ]
 
 [[package]]
@@ -4004,8 +4003,10 @@ dependencies = [
  "rand 0.10.2",
  "redb",
  "relus_api",
+ "relus_cli",
  "relus_common",
  "relus_connector_rdbms",
+ "relus_engine",
  "relus_reader",
  "relus_writer",
  "reqwest 0.12.28",
@@ -4018,6 +4019,28 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "relus_engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "indicatif",
+ "nom",
+ "parking_lot",
+ "relus_common",
+ "relus_connector_rdbms",
+ "relus_reader",
+ "relus_writer",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

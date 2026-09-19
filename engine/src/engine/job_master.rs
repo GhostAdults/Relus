@@ -6,7 +6,7 @@ use relus_reader::ReadTask;
 use relus_writer::WriteTask;
 
 use super::state::{Job, JobId, StateRepository, Task, TaskGroup, TaskGroupId};
-use crate::core::planner::ExecutionPlan;
+use crate::logic_planner::ExecutionPlan;
 
 /// A task pair and its lifecycle entry.  The descriptors are immutable; only
 /// the state entry is updated by later execution services.
@@ -37,7 +37,7 @@ pub struct RuntimeJob {
     pub groups: Vec<RuntimeTaskGroup>,
     pub reader: relus_reader::Source,
     pub writer: relus_writer::Sink,
-    pub pipeline: crate::pipeline::PipelineConfig,
+    pub pipeline: relus_common::pipeline::PipelineConfig,
     pub record_builder: std::sync::Arc<crate::pipeline::RecordBuilder>,
     pub stream_mode: relus_reader::StreamMode,
 }
@@ -129,7 +129,7 @@ mod tests {
             writer: Arc::new(FakeWriter {
                 count: writer_count,
             }),
-            pipeline: crate::pipeline::PipelineConfig {
+            pipeline: relus_common::pipeline::PipelineConfig {
                 channel_number: 2,
                 per_group_channel: 1,
                 ..Default::default()

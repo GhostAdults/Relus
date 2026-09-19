@@ -6,8 +6,14 @@ edition = { workspace = true }
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "relus_cli"
+path = "src/main.rs"
+
 [dependencies]
 relus_common = { workspace = true }
+relus_cli = { workspace = true }
+relus_engine = { workspace = true }
 relus_connector_rdbms = { workspace = true }
 relus_reader = { workspace = true }
 relus_writer = { workspace = true }

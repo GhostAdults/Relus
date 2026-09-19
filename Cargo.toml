@@ -2,6 +2,7 @@
 
 members = [
     "core",
+    "engine",
     "cli",
     "reader",
     "common",
@@ -32,11 +33,13 @@ codegen-units = 1 # 减少代码生成单元以提高性能
 
 [workspace.dependencies]
 relus_core = { path = "core" }
+relus_engine = { path = "engine" }
 relus_common = { path = "common" }
 relus_reader = { path = "reader" }
 relus_writer = { path = "writer" }
 relus_connector_rdbms = { path = "connector-rdbms" }
 relus_api = { path = "api" }
+relus_cli = { path = "cli" }
 
 
 toml = "0.8"

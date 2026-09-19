@@ -23,7 +23,7 @@ fn prepare_task_group(group: &RuntimeTaskGroup) -> crate::pipeline::PreparedTask
 pub struct WorkerContext {
     pub reader: relus_reader::Source,
     pub writer: relus_writer::Sink,
-    pub pipeline: crate::pipeline::PipelineConfig,
+    pub pipeline: relus_common::pipeline::PipelineConfig,
     pub record_builder: Arc<crate::pipeline::RecordBuilder>,
 }
 

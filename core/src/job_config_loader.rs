@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
-pub(crate) enum JobConfigLoadError {
+pub enum JobConfigLoadError {
     Read {
         path: PathBuf,
         source: std::io::Error,
@@ -36,7 +36,7 @@ impl std::error::Error for JobConfigLoadError {
     }
 }
 
-pub(crate) fn load(path: &Path) -> Result<JobConfig, JobConfigLoadError> {
+pub fn load(path: &Path) -> Result<JobConfig, JobConfigLoadError> {
     let data = std::fs::read_to_string(path).map_err(|source| JobConfigLoadError::Read {
         path: path.to_path_buf(),
         source,

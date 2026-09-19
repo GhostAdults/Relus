@@ -12,11 +12,7 @@ use anyhow::Result;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use indicatif::ProgressBar;
-use relus_common::constant::pipeline::{
-    DEFAULT_BATCH_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_CHANNEL_NUMBER, DEFAULT_PER_GROUP_CHANNEL,
-    DEFAULT_READER_THREADS,
-};
-use relus_common::pipeline::PipelineMessage;
+use relus_common::pipeline::{PipelineConfig, PipelineMessage};
 use relus_reader::{DataReader, ReadTask};
 use relus_writer::{DataWriter, WriteTask};
 use serde::{Deserialize, Serialize};
@@ -27,9 +23,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::core::engine::task_execution::{TaskLifecycleObserver, TaskOutcome};
-use crate::core::progress::create_progress_bars;
+use crate::engine::task_execution::{TaskLifecycleObserver, TaskOutcome};
 use crate::pipeline::RecordBuilder;
+use crate::progress::create_progress_bars;
 
 // ==========================================
 // 配置
@@ -180,102 +176,6 @@ where
     })
 }
 
-/// 管道配置
-#[derive(Debug, Clone)]
-pub struct PipelineConfig {
-    /// Reader 线程数（决定 Task 数量）
-    pub reader_threads: usize,
-    /// Channel 缓冲区大小
-    pub buffer_size: usize,
-    /// 全局并发 channel 数
-    pub channel_number: usize,
-    /// 每个 TaskGroup 内并发 channel 数
-    pub per_group_channel: usize,
-    /// 批处理大小
-    pub batch_size: usize,
-    /// 是否使用事务
-    pub use_transaction: bool,
-}
-
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self {
-            reader_threads: DEFAULT_READER_THREADS,
-            buffer_size: DEFAULT_BUFFER_SIZE,
-            channel_number: DEFAULT_CHANNEL_NUMBER,
-            per_group_channel: DEFAULT_PER_GROUP_CHANNEL,
-            batch_size: DEFAULT_BATCH_SIZE,
-            use_transaction: true,
-        }
-    }
-}
-
-impl PipelineConfig {
-    pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.reader_threads > 0,
-            "reader_threads must be greater than zero"
-        );
-        anyhow::ensure!(
-            self.buffer_size > 0,
-            "buffer_size must be greater than zero"
-        );
-        anyhow::ensure!(
-            self.channel_number > 0,
-            "channel_number must be greater than zero"
-        );
-        anyhow::ensure!(
-            self.per_group_channel > 0,
-            "per_group_channel must be greater than zero"
-        );
-        anyhow::ensure!(self.batch_size > 0, "batch_size must be greater than zero");
-        Ok(())
-    }
-
-    /// 从系统配置读取 pipeline 参数
-    ///
-    /// 优先级：系统配置 (default.config.json) > 常量默认值
-    pub fn from_system_config(job_config: &relus_common::JobConfig) -> Self {
-        let (sys_reader, sys_buffer, sys_channel, sys_per_group, sys_batch, sys_tx) =
-            crate::get_config_manager()
-                .map(|mgr| {
-                    let m = mgr.read();
-                    (
-                        m.get("pipeline.reader_threads").and_then(as_positive_usize),
-                        m.get("pipeline.buffer_size").and_then(as_positive_usize),
-                        m.get("pipeline.channel_number").and_then(as_positive_usize),
-                        m.get("pipeline.per_group_channel")
-                            .and_then(as_positive_usize),
-                        m.get("pipeline.batch_size").and_then(as_positive_usize),
-                        m.get("pipeline.use_transaction").and_then(|v| v.as_bool()),
-                    )
-                })
-                .unwrap_or((None, None, None, None, None, None));
-
-        Self {
-            reader_threads: sys_reader.unwrap_or(DEFAULT_READER_THREADS),
-            buffer_size: job_config
-                .channel_buffer_size
-                .or(sys_buffer)
-                .unwrap_or(DEFAULT_BUFFER_SIZE),
-            channel_number: sys_channel.unwrap_or(DEFAULT_CHANNEL_NUMBER),
-            per_group_channel: sys_per_group.unwrap_or(DEFAULT_PER_GROUP_CHANNEL),
-            batch_size: job_config
-                .batch_size
-                .or(sys_batch)
-                .unwrap_or(DEFAULT_BATCH_SIZE),
-            use_transaction: sys_tx.unwrap_or(true),
-        }
-    }
-}
-
-fn as_positive_usize(value: &relus_common::app_config::value::ConfigValue) -> Option<usize> {
-    value
-        .as_i64()
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value > 0)
-}
-
 /// 管道执行统计
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineStats {
@@ -365,7 +265,7 @@ where
         write_task,
     } = pair;
 
-    let (tx, rx) = crate::core::engine::channel::Channel::new(ctx.buffer_size).pair();
+    let (tx, rx) = crate::engine::channel::Channel::new(ctx.buffer_size).pair();
     let was_cancelled = ctx.cancel_token.is_cancelled();
 
     let r = Arc::clone(&ctx.reader);
@@ -398,7 +298,7 @@ where
     });
 
     // 中间转发 task: rx → writer_bar.inc → tx2，Writer 拿 rx2
-    let (tx2, rx2) = crate::core::engine::channel::Channel::new(ctx.buffer_size).pair();
+    let (tx2, rx2) = crate::engine::channel::Channel::new(ctx.buffer_size).pair();
     let w_bar = ctx.progress.writer_bar.clone();
     let relay_handle = tokio::spawn(async move {
         let mut rx = rx;

@@ -1,0 +1,29 @@
+[package]
+name = "relus_engine"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+relus_common = { workspace = true }
+relus_connector_rdbms = { workspace = true }
+relus_reader = { workspace = true }
+relus_writer = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+indicatif = { workspace = true }
+nom = "7.1"
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

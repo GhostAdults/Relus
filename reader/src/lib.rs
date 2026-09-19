@@ -74,7 +74,7 @@ pub trait DataReaderTask: Send + Sync {
 /// parent traits, where `async_trait` provides object-safe futures.
 pub trait DataReader: DataReaderJob + DataReaderTask {}
 
-impl<T: DataReaderJob + DataReaderTask> DataReader for T {}
+impl<T> DataReader for T where T: DataReaderJob + DataReaderTask {}
 
 // ==========================================
 // Reader 全局注册表

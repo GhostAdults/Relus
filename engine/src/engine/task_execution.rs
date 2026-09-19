@@ -323,9 +323,9 @@ impl relus_writer::DataWriterTask for EmptyWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::engine::job_master::RuntimeTaskGroup;
-    use crate::core::engine::runtime::TokioRuntime;
-    use crate::core::engine::state::{
+    use crate::engine::job_master::RuntimeTaskGroup;
+    use crate::engine::runtime::TokioRuntime;
+    use crate::engine::state::{
         Job, JobId, StateRepository, TaskGroup, TaskGroupId, TaskGroupState,
     };
     use async_trait::async_trait;

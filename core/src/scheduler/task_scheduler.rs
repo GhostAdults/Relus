@@ -7,11 +7,11 @@ use super::control::{
 use super::cron::CronTracker;
 use super::repl::ReplLoop;
 use super::task_slot::{TaskPhase, TaskSlot};
-use crate::core::engine::contracts::{RunResult, RunStatus};
-use crate::core::engine::coordinator::CoordinatorService;
-use crate::core::serve::start_task_with_coordinator;
+use crate::relus_starter::start_task_with_coordinator;
 use anyhow::Result;
 use relus_common::job_config::{JobConfig, SyncMode};
+use relus_engine::engine::contracts::{RunResult, RunStatus};
+use relus_engine::engine::coordinator::CoordinatorService;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -583,7 +583,7 @@ mod tests {
         TaskScheduler::new_with_coordinator(
             dir.path().join("checkpoints.redb"),
             Arc::new(CoordinatorService::new(
-                crate::core::engine::state::StateRepository::new(),
+                relus_engine::engine::state::StateRepository::new(),
             )),
         )
         .expect("scheduler")

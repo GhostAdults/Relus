@@ -1,4 +1,4 @@
-use crate::core::scheduler::cmd::{Schedule, TaskDoneResult, TaskInfo, TaskStats};
+use crate::scheduler::cmd::{Schedule, TaskDoneResult, TaskInfo, TaskStats};
 use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 

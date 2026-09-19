@@ -1,15 +1,13 @@
-pub mod core;
-pub mod dsl_engine;
-pub mod pipeline;
+pub mod job_config_loader;
+pub mod relus_starter;
+pub mod scheduler;
+pub mod server;
 
 // 确保 inventory::submit! 被 core 链接
 use relus_reader as _;
 use relus_writer as _;
 
-use crate::core::engine::contracts::RunStatus;
-use crate::core::scheduler::{
-    SchedulerControlHandle, SchedulerError, SchedulerResponse, TaskScheduler,
-};
+use crate::scheduler::{SchedulerControlHandle, SchedulerError, SchedulerResponse, TaskScheduler};
 use anyhow::Result;
 use parking_lot::RwLock;
 use relus_api::server::{
@@ -24,6 +22,7 @@ use relus_common::app_config::value::ConfigValue;
 use relus_common::app_config::watcher;
 use relus_common::job_config::JobConfig;
 use relus_common::resp::ApiResp;
+use relus_engine::engine::contracts::RunStatus;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,19 +30,19 @@ use std::sync::OnceLock;
 
 #[derive(Clone)]
 pub struct ApplicationState {
-    coordinator: Arc<crate::core::engine::coordinator::CoordinatorService>,
+    coordinator: Arc<relus_engine::engine::coordinator::CoordinatorService>,
 }
 
 impl ApplicationState {
     pub fn new() -> Self {
         Self {
-            coordinator: Arc::new(crate::core::engine::coordinator::CoordinatorService::new(
-                crate::core::engine::state::StateRepository::new(),
+            coordinator: Arc::new(relus_engine::engine::coordinator::CoordinatorService::new(
+                relus_engine::engine::state::StateRepository::new(),
             )),
         }
     }
 
-    pub fn coordinator(&self) -> Arc<crate::core::engine::coordinator::CoordinatorService> {
+    pub fn coordinator(&self) -> Arc<relus_engine::engine::coordinator::CoordinatorService> {
         Arc::clone(&self.coordinator)
     }
 }
@@ -61,7 +60,7 @@ pub fn application_state() -> ApplicationState {
 }
 
 /// Returns the process-wide Engine boundary used by all application entry points.
-pub fn application_coordinator() -> Arc<crate::core::engine::coordinator::CoordinatorService> {
+pub fn application_coordinator() -> Arc<relus_engine::engine::coordinator::CoordinatorService> {
     application_state().coordinator()
 }
 
@@ -191,14 +190,14 @@ pub fn init_and_watch_config() {
 }
 
 struct CoreSyncExecutor {
-    coordinator: Arc<crate::core::engine::coordinator::CoordinatorService>,
+    coordinator: Arc<relus_engine::engine::coordinator::CoordinatorService>,
 }
 
 impl SyncExecutor for CoreSyncExecutor {
     fn execute_sync(&self, config: JobConfig) -> ApiFuture<ApiHandlerResult> {
         let coordinator = Arc::clone(&self.coordinator);
         Box::pin(async move {
-            match crate::core::serve::start_task_with_coordinator(
+            match crate::relus_starter::start_task_with_coordinator(
                 Arc::new(config),
                 tokio_util::sync::CancellationToken::new(),
                 coordinator,
@@ -370,7 +369,7 @@ pub async fn run_scheduler(
         let schedule = config
             .schedule
             .as_ref()
-            .map(crate::core::scheduler::Schedule::from_config)
+            .map(crate::scheduler::Schedule::from_config)
             .transpose()
             .map_err(|message| anyhow::anyhow!("job '{}' schedule invalid: {}", job_id, message))?
             .unwrap_or_default();
@@ -460,13 +459,13 @@ mod application_state_tests {
         }
     }
 
-    fn empty_plan() -> crate::core::planner::ExecutionPlan {
-        crate::core::planner::ExecutionPlan {
+    fn empty_plan() -> relus_engine::logic_planner::ExecutionPlan {
+        relus_engine::logic_planner::ExecutionPlan {
             reader: Arc::new(EmptyReader),
             writer: Arc::new(EmptyWriter),
             pipeline: Default::default(),
             record_builder: Arc::new(
-                crate::pipeline::RecordBuilder::new(Default::default(), None)
+                relus_engine::pipeline::RecordBuilder::new(Default::default(), None)
                     .expect("empty mapping"),
             ),
             reader_split: SplitReaderResult {

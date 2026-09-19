@@ -1,6 +1,6 @@
 use relus_common::job_config::{CreateConfigReq, UpdateConfigReq};
-use relus_core::core::serve::{create_config, update_config};
 use relus_core::init_system_config;
+use relus_core::relus_starter::{create_config, update_config};
 
 use serde_json::json;
 

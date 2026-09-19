@@ -23,7 +23,7 @@ cargo build
 构建 release CLI：
 
 ```bash
-cargo build --release -p relus_cli --bin relus_cli
+cargo build --release -p relus_core --bin relus_cli
 ```
 
 构建完成后的二进制位置：
@@ -49,7 +49,7 @@ cargo test --workspace
 开发环境可以直接用 `cargo run`：
 
 ```bash
-cargo run -p relus_cli -- sync -c cli/user_config/default_job.json
+cargo run -p relus_core --bin relus_cli -- sync -c cli/user_config/default_job.json
 ```
 
 release 二进制：

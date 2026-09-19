@@ -26,6 +26,7 @@ anyhow = { workspace = true }
 
 
 relus_core = { workspace = true }
+relus_engine = { workspace = true }
 relus_common = { workspace = true }
 relus_connector_rdbms = { workspace = true }
 sqlx = { workspace = true }

@@ -1,4 +1,4 @@
-use crate::core::scheduler::cmd::Schedule;
+use crate::scheduler::cmd::Schedule;
 use chrono::Utc;
 use cron::Schedule as CronSchedule;
 use std::collections::HashMap;

@@ -11,11 +11,11 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::core::engine::{
+use relus_engine::engine::{
     contracts::{JobHandle, RunResult},
     coordinator::CoordinatorService,
 };
-use crate::core::planner::{Planner, PlanningDependencies, RegistryPlanningDependencies};
+use relus_engine::logic_planner::{Planner, PlanningDependencies, RegistryPlanningDependencies};
 
 /// Prepares and synchronously waits for one synchronization job.
 pub async fn start_task(
@@ -77,7 +77,7 @@ pub(crate) async fn submit_job_with(
 }
 
 fn submit_prepared_job(
-    plan: crate::core::planner::ExecutionPlan,
+    plan: relus_engine::logic_planner::ExecutionPlan,
     coordinator: Arc<CoordinatorService>,
 ) -> anyhow::Result<(JobHandle, StreamMode)> {
     let stream_mode = plan.stream_mode;
@@ -105,7 +105,7 @@ pub async fn submit_job(config: Arc<JobConfig>) -> anyhow::Result<JobHandle> {
     .await
 }
 
-pub fn job_handle(id: crate::core::engine::state::JobId) -> Option<JobHandle> {
+pub fn job_handle(id: relus_engine::engine::state::JobId) -> Option<JobHandle> {
     crate::application_coordinator().job_handle(id)
 }
 
@@ -183,7 +183,7 @@ pub async fn create_config(req: CreateConfigReq) -> (StatusCode, ApiResp<Value>)
 }
 
 fn default_system_config() -> anyhow::Result<Value> {
-    let content = include_str!("../../../cli/user_config/default.config.json");
+    let content = include_str!("../../cli/user_config/default.config.json");
     Ok(serde_json::from_str(content)?)
 }
 
@@ -369,8 +369,8 @@ mod tests {
         fn build_record_builder(
             &self,
             config: &JobConfig,
-        ) -> Result<crate::pipeline::RecordBuilder> {
-            crate::pipeline::RecordBuilder::new(
+        ) -> Result<relus_engine::pipeline::RecordBuilder> {
+            relus_engine::pipeline::RecordBuilder::new(
                 config.column_mapping.clone(),
                 config.column_types.clone(),
             )
@@ -401,14 +401,14 @@ mod tests {
                 pending: false,
             },
             Arc::new(CoordinatorService::new(
-                crate::core::engine::state::StateRepository::new(),
+                relus_engine::engine::state::StateRepository::new(),
             )),
         )
         .await
         .expect("batch result");
         assert_eq!(
             result.status,
-            crate::core::engine::contracts::RunStatus::Success
+            relus_engine::engine::contracts::RunStatus::Success
         );
     }
 
@@ -422,14 +422,14 @@ mod tests {
                 pending: false,
             },
             Arc::new(CoordinatorService::new(
-                crate::core::engine::state::StateRepository::new(),
+                relus_engine::engine::state::StateRepository::new(),
             )),
         )
         .await
         .expect("stream result");
         assert_eq!(
             result.status,
-            crate::core::engine::contracts::RunStatus::Failed
+            relus_engine::engine::contracts::RunStatus::Failed
         );
         assert_eq!(result.error.as_deref(), Some("Stream pipeline 非预期退出"));
     }
@@ -445,7 +445,7 @@ mod tests {
                 pending: true,
             },
             Arc::new(CoordinatorService::new(
-                crate::core::engine::state::StateRepository::new(),
+                relus_engine::engine::state::StateRepository::new(),
             )),
         ));
         tokio::task::yield_now().await;
@@ -458,14 +458,14 @@ mod tests {
             .expect("shutdown result");
         assert_eq!(
             result.status,
-            crate::core::engine::contracts::RunStatus::Shutdown
+            relus_engine::engine::contracts::RunStatus::Shutdown
         );
     }
 
     #[tokio::test]
     async fn async_submit_exposes_shared_handle_snapshot_and_repeatable_result() {
         let coordinator = Arc::new(CoordinatorService::new(
-            crate::core::engine::state::StateRepository::new(),
+            relus_engine::engine::state::StateRepository::new(),
         ));
         let handle = submit_job_with(
             config(),
@@ -489,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn late_cancellation_does_not_override_completed_success() {
         let coordinator = Arc::new(CoordinatorService::new(
-            crate::core::engine::state::StateRepository::new(),
+            relus_engine::engine::state::StateRepository::new(),
         ));
         let handle = submit_job_with(
             config(),
@@ -509,7 +509,7 @@ mod tests {
             .expect("compatibility result");
         assert_eq!(
             result.status,
-            crate::core::engine::contracts::RunStatus::Success
+            relus_engine::engine::contracts::RunStatus::Success
         );
     }
 }

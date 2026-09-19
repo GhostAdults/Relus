@@ -9,12 +9,9 @@ mod record;
 mod record_builder;
 
 pub(crate) use executor::run_prepared_task_group;
-pub use executor::{
-    PipelineConfig, PipelineStats, PreparedGroupStats, PreparedPipelineTask, PreparedTaskGroup,
-};
+pub use executor::{PipelineStats, PreparedGroupStats, PreparedPipelineTask, PreparedTaskGroup};
 pub use record::*;
 pub use record_builder::*;
-
 // Re-export 消息类型（定义在 common）
 pub use relus_common::pipeline::{DbBatch, PipelineMessage};
 // Re-export MappingRow 相关类型

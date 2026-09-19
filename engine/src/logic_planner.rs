@@ -1,12 +1,13 @@
 //! Configuration parsing and preparation boundary.
 
 use anyhow::{anyhow, Context, Result};
+use relus_common::app_config::value::ConfigValue;
 use relus_common::job_config::JobConfig;
+use relus_common::pipeline::PipelineConfig;
 use relus_reader::{ReaderRegistry, Source, SplitReaderResult, StreamMode};
 use relus_writer::{Sink, WriterRegistry};
 use std::sync::Arc;
 
-use crate::pipeline::PipelineConfig;
 use crate::pipeline::RecordBuilder;
 
 pub trait PlanningDependencies: Send + Sync {
@@ -71,7 +72,7 @@ impl Planner {
         Self::prepare_with(config, &RegistryPlanningDependencies).await
     }
 
-    pub(crate) async fn prepare_with(
+    pub async fn prepare_with(
         config: Arc<JobConfig>,
         dependencies: &dyn PlanningDependencies,
     ) -> Result<ExecutionPlan> {
@@ -82,7 +83,7 @@ impl Planner {
                 .build_record_builder(&config)
                 .context("planning: build RecordBuilder")?,
         );
-        let pipeline = PipelineConfig::from_system_config(&config);
+        let pipeline = pipeline_config_from_system_config(&config);
         pipeline
             .validate()
             .context("planning: validate pipeline config")?;
@@ -106,6 +107,48 @@ impl Planner {
             stream_mode,
         })
     }
+}
+
+fn pipeline_config_from_system_config(job_config: &JobConfig) -> PipelineConfig {
+    let defaults = PipelineConfig::default();
+    let (sys_reader, sys_buffer, sys_channel, sys_per_group, sys_batch, sys_tx) =
+        relus_common::app_config::config_loader::get_config_manager()
+            .map(|mgr| {
+                let m = mgr.read();
+                (
+                    m.get("pipeline.reader_threads").and_then(as_positive_usize),
+                    m.get("pipeline.buffer_size").and_then(as_positive_usize),
+                    m.get("pipeline.channel_number").and_then(as_positive_usize),
+                    m.get("pipeline.per_group_channel")
+                        .and_then(as_positive_usize),
+                    m.get("pipeline.batch_size").and_then(as_positive_usize),
+                    m.get("pipeline.use_transaction")
+                        .and_then(ConfigValue::as_bool),
+                )
+            })
+            .unwrap_or((None, None, None, None, None, None));
+
+    PipelineConfig {
+        reader_threads: sys_reader.unwrap_or(defaults.reader_threads),
+        buffer_size: job_config
+            .channel_buffer_size
+            .or(sys_buffer)
+            .unwrap_or(defaults.buffer_size),
+        channel_number: sys_channel.unwrap_or(defaults.channel_number),
+        per_group_channel: sys_per_group.unwrap_or(defaults.per_group_channel),
+        batch_size: job_config
+            .batch_size
+            .or(sys_batch)
+            .unwrap_or(defaults.batch_size),
+        use_transaction: sys_tx.unwrap_or(defaults.use_transaction),
+    }
+}
+
+fn as_positive_usize(value: &ConfigValue) -> Option<usize> {
+    value
+        .as_i64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
 }
 
 fn validate_config(config: &JobConfig) -> Result<()> {
