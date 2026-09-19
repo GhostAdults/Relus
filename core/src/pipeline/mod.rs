@@ -8,9 +8,9 @@ pub mod executor;
 mod record;
 mod record_builder;
 
+pub(crate) use executor::run_prepared_task_group;
 pub use executor::{
-    run_prepared_task_group, PipelineConfig, PipelineStats, PreparedGroupStats,
-    PreparedPipelineTask, PreparedTaskGroup,
+    PipelineConfig, PipelineStats, PreparedGroupStats, PreparedPipelineTask, PreparedTaskGroup,
 };
 pub use record::*;
 pub use record_builder::*;

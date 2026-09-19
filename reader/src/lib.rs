@@ -18,6 +18,9 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
 
+/// Shared Reader adapter selected by the runtime Registry.
+pub type Source = Arc<dyn DataReader>;
+
 // ==========================================
 // Reader trait 定义
 // ==========================================
@@ -78,7 +81,7 @@ impl<T: DataReaderJob + DataReaderTask> DataReader for T {}
 // ==========================================
 
 /// Reader 创建函数类型
-type ReaderCreator = fn(Arc<JobConfig>) -> Result<Arc<dyn DataReader>>;
+type ReaderCreator = fn(Arc<JobConfig>) -> Result<Source>;
 
 /// Reader 插件（由各 reader 实现通过 inventory::submit! 注册）
 pub struct ReaderPlugin {
@@ -129,7 +132,7 @@ impl ReaderRegistry {
         &self,
         source_type: &str,
         config: Arc<JobConfig>,
-    ) -> Result<Arc<dyn DataReader>, Error> {
+    ) -> Result<Source, Error> {
         let creators = self
             .creators
             .read()

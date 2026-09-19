@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::mpsc;
 
+/// Shared Writer adapter selected by the runtime Registry.
+pub type Sink = Arc<dyn DataWriter>;
+
 // ==========================================
 // Writer trait 定义
 // ==========================================
@@ -59,7 +62,7 @@ impl<T: DataWriterJob + DataWriterTask> DataWriter for T {}
 // Writer 全局注册表
 // ==========================================
 
-type WriterCreator = fn(Arc<JobConfig>) -> Result<Arc<dyn DataWriter>>;
+type WriterCreator = fn(Arc<JobConfig>) -> Result<Sink>;
 
 /// Writer 插件
 pub struct WriterPlugin {
@@ -102,11 +105,7 @@ impl WriterRegistry {
         let _ = Self::instance();
     }
 
-    pub fn prepare_writer(
-        &self,
-        source_type: &str,
-        config: Arc<JobConfig>,
-    ) -> Result<Arc<dyn DataWriter>, Error> {
+    pub fn prepare_writer(&self, source_type: &str, config: Arc<JobConfig>) -> Result<Sink, Error> {
         let creators = self
             .creators
             .read()

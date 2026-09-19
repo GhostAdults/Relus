@@ -21,8 +21,8 @@ fn prepare_task_group(group: &RuntimeTaskGroup) -> crate::pipeline::PreparedTask
 
 #[derive(Clone)]
 pub struct WorkerContext {
-    pub reader: Arc<dyn relus_reader::DataReader>,
-    pub writer: Arc<dyn relus_writer::DataWriter>,
+    pub reader: relus_reader::Source,
+    pub writer: relus_writer::Sink,
     pub pipeline: crate::pipeline::PipelineConfig,
     pub record_builder: Arc<crate::pipeline::RecordBuilder>,
 }

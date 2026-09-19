@@ -2,30 +2,30 @@
 
 use anyhow::{anyhow, Context, Result};
 use relus_common::job_config::JobConfig;
-use relus_reader::{DataReader, ReaderRegistry, SplitReaderResult, StreamMode};
-use relus_writer::{DataWriter, WriterRegistry};
+use relus_reader::{ReaderRegistry, Source, SplitReaderResult, StreamMode};
+use relus_writer::{Sink, WriterRegistry};
 use std::sync::Arc;
 
 use crate::pipeline::PipelineConfig;
 use crate::pipeline::RecordBuilder;
 
 pub trait PlanningDependencies: Send + Sync {
-    fn create_reader(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataReader>>;
-    fn create_writer(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataWriter>>;
+    fn create_reader(&self, config: Arc<JobConfig>) -> Result<Source>;
+    fn create_writer(&self, config: Arc<JobConfig>) -> Result<Sink>;
     fn build_record_builder(&self, config: &JobConfig) -> Result<RecordBuilder>;
 }
 
 pub struct RegistryPlanningDependencies;
 
 impl PlanningDependencies for RegistryPlanningDependencies {
-    fn create_reader(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataReader>> {
+    fn create_reader(&self, config: Arc<JobConfig>) -> Result<Source> {
         let source_type = config.source.source_type.clone();
         ReaderRegistry::instance()
             .prepare_reader(&source_type, config)
             .context("registry Reader creation failed")
     }
 
-    fn create_writer(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataWriter>> {
+    fn create_writer(&self, config: Arc<JobConfig>) -> Result<Sink> {
         let source_type = config.sink.source_type.clone();
         WriterRegistry::instance()
             .prepare_writer(&source_type, config)
@@ -53,10 +53,10 @@ pub struct ExecutionPlan {
     /// selected instance across tasks. Making downstream functions generic
     /// over this already type-erased value would not restore static dispatch;
     /// unlike `AsRef<Path>`, this is behavior polymorphism, not input conversion.
-    pub reader: Arc<dyn DataReader>,
+    pub reader: Source,
     /// Writer counterpart to `reader`: `dyn` erases the runtime-selected type
     /// and `Arc` provides shared ownership across task execution.
-    pub writer: Arc<dyn DataWriter>,
+    pub writer: Sink,
     pub pipeline: PipelineConfig,
     pub record_builder: Arc<RecordBuilder>,
     pub reader_split: SplitReaderResult,
@@ -217,14 +217,14 @@ mod tests {
     }
 
     impl PlanningDependencies for FakeDependencies {
-        fn create_reader(&self, _config: Arc<JobConfig>) -> Result<Arc<dyn DataReader>> {
+        fn create_reader(&self, _config: Arc<JobConfig>) -> Result<Source> {
             self.factory_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(FakeReader {
                 split_count: Arc::clone(&self.split_count),
                 mode: self.mode,
             }))
         }
-        fn create_writer(&self, _config: Arc<JobConfig>) -> Result<Arc<dyn DataWriter>> {
+        fn create_writer(&self, _config: Arc<JobConfig>) -> Result<Sink> {
             self.factory_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(FakeWriter))
         }

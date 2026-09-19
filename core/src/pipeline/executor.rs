@@ -35,15 +35,28 @@ use crate::pipeline::RecordBuilder;
 // 配置
 // ==========================================
 
-#[derive(Clone)]
-struct PipelineRunContext {
-    reader: Arc<dyn DataReader>,
-    writer: Arc<dyn DataWriter>,
+struct PipelineRunContext<R: DataReader + ?Sized, W: DataWriter + ?Sized> {
+    reader: Arc<R>,
+    writer: Arc<W>,
     buffer_size: usize,
     batch_size: usize,
     record_builder: Arc<RecordBuilder>,
     cancel_token: CancellationToken,
     progress: PipelineProgress,
+}
+
+impl<R: DataReader + ?Sized, W: DataWriter + ?Sized> Clone for PipelineRunContext<R, W> {
+    fn clone(&self) -> Self {
+        Self {
+            reader: Arc::clone(&self.reader),
+            writer: Arc::clone(&self.writer),
+            buffer_size: self.buffer_size,
+            batch_size: self.batch_size,
+            record_builder: Arc::clone(&self.record_builder),
+            cancel_token: self.cancel_token.clone(),
+            progress: self.progress.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -99,15 +112,19 @@ pub struct PreparedGroupStats {
     pub elapsed: std::time::Duration,
 }
 
-pub async fn run_prepared_task_group(
+pub(crate) async fn run_prepared_task_group<R, W>(
     prepared: PreparedTaskGroup,
-    reader: Arc<dyn DataReader>,
-    writer: Arc<dyn DataWriter>,
+    reader: Arc<R>,
+    writer: Arc<W>,
     config: PipelineConfig,
     record_builder: Arc<RecordBuilder>,
     cancel_token: CancellationToken,
     observer: Arc<dyn TaskLifecycleObserver>,
-) -> Result<PreparedGroupStats> {
+) -> Result<PreparedGroupStats>
+where
+    R: DataReader + ?Sized + 'static,
+    W: DataWriter + ?Sized + 'static,
+{
     let started = Instant::now();
     if prepared.tasks.is_empty() {
         return Ok(PreparedGroupStats {
@@ -284,15 +301,18 @@ impl PipelineStats {
 
 /// 从 Reader 获取 JsonStream，消费并通过 RecordBuilder mapping 后发送到 channel
 /// consume_stream_and_send
-async fn csas(
+async fn csas<R>(
     pair_id: usize,
-    reader: Arc<dyn DataReader>,
+    reader: Arc<R>,
     task: &ReadTask,
     batch_size: usize,
     builder: &RecordBuilder,
     tx: &mpsc::Sender<PipelineMessage>,
     reader_bar: &ProgressBar,
-) -> Result<usize> {
+) -> Result<usize>
+where
+    R: DataReader + ?Sized,
+{
     let stream = reader.read_data(task).await?;
     let mut sent = 0;
     let mut buffer = Vec::with_capacity(batch_size);
@@ -329,11 +349,15 @@ async fn csas(
     Ok(sent)
 }
 
-async fn run_task_pair(
+async fn run_task_pair<R, W>(
     pair: PairWork,
-    ctx: PipelineRunContext,
+    ctx: PipelineRunContext<R, W>,
     observer: Option<Arc<dyn TaskLifecycleObserver>>,
-) -> PairResult {
+) -> PairResult
+where
+    R: DataReader + ?Sized + 'static,
+    W: DataWriter + ?Sized + 'static,
+{
     let PairWork {
         pair_id,
         lifecycle_id,
@@ -444,7 +468,11 @@ async fn run_task_pair(
     }
 }
 
-async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResult {
+async fn run_task_group<R, W>(group: GroupWork, ctx: PipelineRunContext<R, W>) -> GroupResult
+where
+    R: DataReader + ?Sized + 'static,
+    W: DataWriter + ?Sized + 'static,
+{
     let GroupWork {
         group_id,
         tasks,
@@ -524,5 +552,125 @@ async fn run_task_group(group: GroupWork, ctx: PipelineRunContext) -> GroupResul
         total_written,
         error: first_error,
         shutdown: group_shutdown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::stream;
+    use relus_common::PipelineMessage;
+    use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
+    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult};
+
+    struct FakeReader;
+
+    #[async_trait]
+    impl DataReaderJob for FakeReader {
+        async fn split(&self, _: usize) -> Result<SplitReaderResult> {
+            Ok(SplitReaderResult {
+                total_records: 0,
+                tasks: Vec::new(),
+                stream_mode: StreamMode::Batch,
+            })
+        }
+
+        fn description(&self) -> String {
+            "pipeline typed fake reader".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataReaderTask for FakeReader {
+        async fn read_data(&self, _: &ReadTask) -> Result<JsonStream> {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    struct FakeWriter;
+
+    struct NoopObserver;
+
+    #[async_trait]
+    impl TaskLifecycleObserver for NoopObserver {
+        async fn deployed(&self, _: usize) {}
+        async fn completed(&self, _: usize, _: TaskOutcome) {}
+    }
+
+    #[async_trait]
+    impl DataWriterJob for FakeWriter {
+        async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+            Ok(SplitWriterResult { tasks: Vec::new() })
+        }
+
+        fn description(&self) -> String {
+            "pipeline typed fake writer".into()
+        }
+    }
+
+    #[async_trait]
+    impl DataWriterTask for FakeWriter {
+        async fn write_data(
+            &self,
+            _: relus_writer::WriteTask,
+            _: tokio::sync::mpsc::Receiver<PipelineMessage>,
+        ) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    fn config() -> PipelineConfig {
+        PipelineConfig {
+            reader_threads: 1,
+            buffer_size: 1,
+            channel_number: 1,
+            per_group_channel: 1,
+            batch_size: 1,
+            use_transaction: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_pipeline_entry_accepts_concrete_and_source_sink_types() {
+        let builder =
+            Arc::new(RecordBuilder::new(std::collections::BTreeMap::new(), None).unwrap());
+        let observer: Arc<dyn TaskLifecycleObserver> = Arc::new(NoopObserver);
+        let stats = run_prepared_task_group(
+            PreparedTaskGroup {
+                group_id: 0,
+                tasks: Vec::new(),
+                concurrency: 1,
+            },
+            Arc::new(FakeReader),
+            Arc::new(FakeWriter),
+            config(),
+            Arc::clone(&builder),
+            CancellationToken::new(),
+            Arc::clone(&observer),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.total_read, 0);
+
+        let source: relus_reader::Source = Arc::new(FakeReader);
+        let sink: relus_writer::Sink = Arc::new(FakeWriter);
+        let stats = run_prepared_task_group(
+            PreparedTaskGroup {
+                group_id: 0,
+                tasks: Vec::new(),
+                concurrency: 1,
+            },
+            source,
+            sink,
+            config(),
+            builder,
+            CancellationToken::new(),
+            observer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.total_written, 0);
     }
 }

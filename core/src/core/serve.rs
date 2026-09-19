@@ -269,10 +269,8 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use relus_common::{job_config::WriteMode, PipelineMessage};
-    use relus_reader::{
-        DataReader, DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult,
-    };
-    use relus_writer::{DataWriter, DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
+    use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult};
+    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
     use tokio::sync::mpsc;
 
     const JOB: &str = r#"{
@@ -354,14 +352,14 @@ mod tests {
     }
 
     impl PlanningDependencies for FakePlanning {
-        fn create_reader(&self, _: Arc<JobConfig>) -> Result<Arc<dyn DataReader>> {
+        fn create_reader(&self, _: Arc<JobConfig>) -> Result<relus_reader::Source> {
             Ok(Arc::new(FakeReader {
                 mode: self.mode,
                 pending: self.pending,
             }))
         }
 
-        fn create_writer(&self, config: Arc<JobConfig>) -> Result<Arc<dyn DataWriter>> {
+        fn create_writer(&self, config: Arc<JobConfig>) -> Result<relus_writer::Sink> {
             Ok(Arc::new(FakeWriter {
                 config,
                 pending: self.pending,

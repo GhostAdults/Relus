@@ -35,8 +35,8 @@ pub struct RuntimeTaskGroup {
 pub struct RuntimeJob {
     pub job: Job,
     pub groups: Vec<RuntimeTaskGroup>,
-    pub reader: std::sync::Arc<dyn relus_reader::DataReader>,
-    pub writer: std::sync::Arc<dyn relus_writer::DataWriter>,
+    pub reader: relus_reader::Source,
+    pub writer: relus_writer::Sink,
     pub pipeline: crate::pipeline::PipelineConfig,
     pub record_builder: std::sync::Arc<crate::pipeline::RecordBuilder>,
     pub stream_mode: relus_reader::StreamMode,
