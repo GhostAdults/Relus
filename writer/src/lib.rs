@@ -46,11 +46,13 @@ pub trait DataWriterTask: Send + Sync {
     ) -> Result<usize>;
 }
 
-/// Writer = DataWriterJob + DataWriterTask
-#[async_trait::async_trait]
+/// Runtime-selected Writer adapter used by Planner and Engine.
+///
+/// The Registry keeps this seam open to multiple implementations, so callers
+/// use type erasure rather than a closed enum. The async methods remain on the
+/// parent traits, where `async_trait` provides object-safe futures.
 pub trait DataWriter: DataWriterJob + DataWriterTask {}
 
-#[async_trait::async_trait]
 impl<T: DataWriterJob + DataWriterTask> DataWriter for T {}
 
 // ==========================================

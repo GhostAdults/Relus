@@ -64,11 +64,13 @@ pub trait DataReaderTask: Send + Sync {
     fn shutdown(&self) {}
 }
 
-/// Reader = DataReaderJob + DataReaderTask
-#[async_trait::async_trait]
+/// Runtime-selected Reader adapter used by Planner and Engine.
+///
+/// The Registry keeps this seam open to multiple implementations, so callers
+/// use type erasure rather than a closed enum. The async methods remain on the
+/// parent traits, where `async_trait` provides object-safe futures.
 pub trait DataReader: DataReaderJob + DataReaderTask {}
 
-#[async_trait::async_trait]
 impl<T: DataReaderJob + DataReaderTask> DataReader for T {}
 
 // ==========================================

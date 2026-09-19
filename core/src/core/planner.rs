@@ -49,7 +49,13 @@ impl PlanningDependencies for RegistryPlanningDependencies {
 ///
 /// The resource-bound physical plan is the `RuntimeJob` built by `JobMaster`.
 pub struct ExecutionPlan {
+    /// The Registry selects the adapter at runtime, while `Arc` shares the
+    /// selected instance across tasks. Making downstream functions generic
+    /// over this already type-erased value would not restore static dispatch;
+    /// unlike `AsRef<Path>`, this is behavior polymorphism, not input conversion.
     pub reader: Arc<dyn DataReader>,
+    /// Writer counterpart to `reader`: `dyn` erases the runtime-selected type
+    /// and `Arc` provides shared ownership across task execution.
     pub writer: Arc<dyn DataWriter>,
     pub pipeline: PipelineConfig,
     pub record_builder: Arc<RecordBuilder>,
