@@ -1,5 +1,5 @@
 use relus_common::job_config::{JobConfig, MappingConfig};
-use relus_core::{init_system_config, relus_starter::start_job};
+use relus_core::{init_system_config, starter::start_job};
 use std::collections::BTreeMap;
 
 #[tokio::main]

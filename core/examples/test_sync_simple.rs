@@ -13,7 +13,7 @@ use anyhow::Result;
 use relus_common::data_source_config::DataSourceConfig;
 use relus_common::job_config::JobConfig;
 use relus_common::types::{SourceType, TypeConverterRegistry};
-use relus_core::relus_starter::start_job;
+use relus_core::starter::start_job;
 use relus_engine::pipeline::RecordBuilder;
 use serde_json::json;
 use std::collections::BTreeMap;

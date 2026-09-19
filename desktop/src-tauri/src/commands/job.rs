@@ -6,7 +6,7 @@ use relus_engine::engine::contracts::RunResult;
 /// the existing core service; job execution remains in `relus_services`.
 #[tauri::command]
 pub async fn start_job(job_config: JobConfig) -> Result<RunResult, String> {
-    relus_core::relus_starter::start_job(job_config)
+    relus_core::starter::start_job(job_config)
         .await
         .map_err(|error| error.to_string())
 }

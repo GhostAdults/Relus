@@ -7,7 +7,7 @@ use super::control::{
 use super::cron::CronTracker;
 use super::repl::ReplLoop;
 use super::task_slot::{TaskPhase, TaskSlot};
-use crate::relus_starter::start_task_with_coordinator;
+use crate::starter::start_task_with_coordinator;
 use anyhow::Result;
 use relus_common::job_config::{JobConfig, SyncMode};
 use relus_engine::engine::contracts::{RunResult, RunStatus};

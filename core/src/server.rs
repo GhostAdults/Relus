@@ -8,7 +8,7 @@ use std::process::ExitCode;
 /// The concrete CLI command type stays in the `relus_cli` crate; this module
 /// owns logging, Tokio runtime sizing, application-state initialization, and
 /// process-level success/failure mapping.
-pub fn main<F, Fut>(dispatch: F) -> ExitCode
+pub fn run<F, Fut>(dispatch: F) -> ExitCode
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,

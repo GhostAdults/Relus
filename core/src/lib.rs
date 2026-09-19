@@ -1,7 +1,8 @@
+pub mod cli;
 pub mod job_config_loader;
-pub mod relus_starter;
 pub mod scheduler;
 pub mod server;
+pub mod starter;
 
 // 确保 inventory::submit! 被 core 链接
 use relus_reader as _;
@@ -197,7 +198,7 @@ impl SyncExecutor for CoreSyncExecutor {
     fn execute_sync(&self, config: JobConfig) -> ApiFuture<ApiHandlerResult> {
         let coordinator = Arc::clone(&self.coordinator);
         Box::pin(async move {
-            match crate::relus_starter::start_task_with_coordinator(
+            match crate::starter::start_task_with_coordinator(
                 Arc::new(config),
                 tokio_util::sync::CancellationToken::new(),
                 coordinator,
