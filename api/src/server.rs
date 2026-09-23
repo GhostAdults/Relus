@@ -11,6 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
+#[cfg(unix)]
+use tokio::signal::unix::{self, SignalKind};
 
 pub type ApiFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type ApiHandlerResult = (StatusCode, ApiResp<Value>);
