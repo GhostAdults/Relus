@@ -11,7 +11,6 @@
 use anyhow::Result;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use indicatif::ProgressBar;
 use relus_common::pipeline::{PipelineConfig, PipelineMessage};
 use relus_reader::{DataReader, ReadTask};
 use relus_writer::{DataWriter, WriteTask};
@@ -23,9 +22,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::engine::contracts::ProgressObserver;
 use crate::engine::task_execution::{TaskLifecycleObserver, TaskOutcome};
 use crate::pipeline::RecordBuilder;
-use crate::progress::create_progress_bars;
 
 // ==========================================
 // 配置
@@ -38,7 +37,7 @@ struct PipelineRunContext<R: DataReader + ?Sized, W: DataWriter + ?Sized> {
     batch_size: usize,
     record_builder: Arc<RecordBuilder>,
     cancel_token: CancellationToken,
-    progress: PipelineProgress,
+    progress: Option<Arc<dyn ProgressObserver>>,
 }
 
 impl<R: DataReader + ?Sized, W: DataWriter + ?Sized> Clone for PipelineRunContext<R, W> {
@@ -53,12 +52,6 @@ impl<R: DataReader + ?Sized, W: DataWriter + ?Sized> Clone for PipelineRunContex
             progress: self.progress.clone(),
         }
     }
-}
-
-#[derive(Clone)]
-struct PipelineProgress {
-    reader_bar: ProgressBar,
-    writer_bar: ProgressBar,
 }
 
 struct PairWork {
@@ -116,6 +109,7 @@ pub(crate) async fn run_prepared_task_group<R, W>(
     record_builder: Arc<RecordBuilder>,
     cancel_token: CancellationToken,
     observer: Arc<dyn TaskLifecycleObserver>,
+    progress: Option<Arc<dyn ProgressObserver>>,
 ) -> Result<PreparedGroupStats>
 where
     R: DataReader + ?Sized + 'static,
@@ -131,8 +125,6 @@ where
             elapsed: started.elapsed(),
         });
     }
-    let total = prepared.tasks.iter().map(|task| task.read_task.limit).sum();
-    let progress_ctx = create_progress_bars(total)?;
     let tasks = prepared
         .tasks
         .into_iter()
@@ -151,10 +143,7 @@ where
         batch_size: config.batch_size,
         record_builder,
         cancel_token: cancel_token.clone(),
-        progress: PipelineProgress {
-            reader_bar: progress_ctx.reader_bar.clone(),
-            writer_bar: progress_ctx.writer_bar.clone(),
-        },
+        progress,
     };
     let result = run_task_group(
         GroupWork {
@@ -166,7 +155,6 @@ where
         ctx,
     )
     .await;
-    progress_ctx.finish()?;
     Ok(PreparedGroupStats {
         total_read: result.total_read,
         total_written: result.total_written,
@@ -208,7 +196,7 @@ async fn csas<R>(
     batch_size: usize,
     builder: &RecordBuilder,
     tx: &mpsc::Sender<PipelineMessage>,
-    reader_bar: &ProgressBar,
+    progress: Option<&Arc<dyn ProgressObserver>>,
 ) -> Result<usize>
 where
     R: DataReader + ?Sized,
@@ -229,7 +217,9 @@ where
                 .await
                 .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
             sent += count;
-            reader_bar.inc(count as u64);
+            if let Some(progress) = progress {
+                progress.records_read(count as u64);
+            }
             buffer.clear();
         }
     }
@@ -242,7 +232,9 @@ where
             .await
             .map_err(|e| anyhow::anyhow!("发送失败: {}", e))?;
         sent += count;
-        reader_bar.inc(count as u64);
+        if let Some(progress) = progress {
+            progress.records_read(count as u64);
+        }
     }
 
     info!("Reader-{} 已发送 {} 条（core mapping）", pair_id, sent);
@@ -272,11 +264,11 @@ where
     let reader_for_cancel = Arc::clone(&ctx.reader);
     let builder = Arc::clone(&ctx.record_builder);
     let reader_cancel = ctx.cancel_token.clone();
-    let r_bar = ctx.progress.reader_bar.clone();
+    let progress = ctx.progress.clone();
     let batch_size = ctx.batch_size;
     let r_handle = tokio::spawn(async move {
         tokio::select! {
-            result = csas(pair_id, r, &read_task, batch_size, &builder, &tx, &r_bar) => {
+            result = csas(pair_id, r, &read_task, batch_size, &builder, &tx, progress.as_ref()) => {
                 match result {
                     Ok(count) => {
                         let _ = tx.send(PipelineMessage::ReaderFinished).await;
@@ -299,12 +291,14 @@ where
 
     // 中间转发 task: rx → writer_bar.inc → tx2，Writer 拿 rx2
     let (tx2, rx2) = crate::engine::channel::Channel::new(ctx.buffer_size).pair();
-    let w_bar = ctx.progress.writer_bar.clone();
+    let progress = ctx.progress.clone();
     let relay_handle = tokio::spawn(async move {
         let mut rx = rx;
         while let Some(msg) = rx.recv().await {
             if let PipelineMessage::DataBatch(rows) = &msg {
-                w_bar.inc(rows.len() as u64);
+                if let Some(progress) = &progress {
+                    progress.records_sent(rows.len() as u64);
+                }
             }
             if tx2.send(msg).await.is_err() {
                 break;
@@ -549,6 +543,7 @@ mod tests {
             Arc::clone(&builder),
             CancellationToken::new(),
             Arc::clone(&observer),
+            None,
         )
         .await
         .unwrap();
@@ -568,6 +563,7 @@ mod tests {
             builder,
             CancellationToken::new(),
             observer,
+            None,
         )
         .await
         .unwrap();

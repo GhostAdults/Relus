@@ -1,13 +1,128 @@
-//! Engine-owned execution contracts shared by future asynchronous entry points.
+//! Engine-owned execution contracts shared by asynchronous entry points.
 
 use super::state::{Job, JobId, JobState, StateRepository, Task, TaskGroup};
 use parking_lot::RwLock;
+use relus_common::job_config::JobConfig;
 use relus_reader::StreamMode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Counts in the prepared physical topology, not OS threads or live concurrency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProgressTopology {
+    /// Number of Reader task descriptors in the physical plan.
+    pub readers: usize,
+    /// Number of paired Writer task descriptors.
+    pub writers: usize,
+    /// Number of TaskGroup Workers in this Job.
+    pub workers: usize,
+}
+
+/// Job-level presentation events. Callbacks must return promptly and must not
+/// wait for this Job's result: `finished` runs before the result is published.
+pub trait ProgressObserver: Send + Sync {
+    fn planned(&self, _topology: ProgressTopology) {}
+    fn started(&self, total_records: Option<u64>);
+    fn records_read(&self, delta: u64);
+    fn records_sent(&self, delta: u64);
+    fn finished(&self, outcome: ProgressOutcome, records_read: u64, records_written: u64);
+}
+
+/// Presentation failures must not fail synchronization or strand result waiters.
+/// Kept internal so every submission (including struct literals) is protected.
+pub(crate) struct SafeProgressObserver {
+    inner: Arc<dyn ProgressObserver>,
+    disabled: std::sync::atomic::AtomicBool,
+}
+
+impl SafeProgressObserver {
+    pub(crate) fn wrap(inner: Arc<dyn ProgressObserver>) -> Arc<dyn ProgressObserver> {
+        Arc::new(Self {
+            inner,
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn notify(&self, finish: bool, callback: impl FnOnce(&dyn ProgressObserver)) {
+        use std::sync::atomic::Ordering;
+        if !finish && self.disabled.load(Ordering::Relaxed) {
+            return;
+        }
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&*self.inner)))
+            .is_err()
+        {
+            self.disabled.store(true, Ordering::Relaxed);
+            tracing::warn!("progress observer panicked; execution result is unaffected");
+        }
+    }
+}
+
+impl ProgressObserver for SafeProgressObserver {
+    fn planned(&self, topology: ProgressTopology) {
+        self.notify(false, |observer| observer.planned(topology));
+    }
+    fn started(&self, total_records: Option<u64>) {
+        self.notify(false, |observer| observer.started(total_records));
+    }
+    fn records_read(&self, delta: u64) {
+        self.notify(false, |observer| observer.records_read(delta));
+    }
+    fn records_sent(&self, delta: u64) {
+        self.notify(false, |observer| observer.records_sent(delta));
+    }
+    fn finished(&self, outcome: ProgressOutcome, records_read: u64, records_written: u64) {
+        // Always give the adapter a chance to stop ticking and release the terminal.
+        self.notify(true, |observer| {
+            observer.finished(outcome, records_read, records_written)
+        });
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ExecutionOptions {
+    pub progress: Option<Arc<dyn ProgressObserver>>,
+}
+
+impl ExecutionOptions {
+    pub fn with_progress(mut self, observer: Arc<dyn ProgressObserver>) -> Self {
+        self.progress = Some(observer);
+        self
+    }
+}
+
+pub struct JobSubmission {
+    pub config: Arc<JobConfig>,
+    pub options: ExecutionOptions,
+}
+
+impl JobSubmission {
+    pub fn new(config: Arc<JobConfig>) -> Self {
+        Self {
+            config,
+            options: ExecutionOptions::default(),
+        }
+    }
+    pub fn with_options(mut self, options: ExecutionOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+impl From<Arc<JobConfig>> for JobSubmission {
+    fn from(config: Arc<JobConfig>) -> Self {
+        Self::new(config)
+    }
+}
 
 /// Compatibility result returned by synchronous execution entry points.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,7 +134,7 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    pub fn from_engine(result: EngineExecutionResult, stream_mode: StreamMode) -> Self {
+    pub fn from_engine(result: EngineExecutionResult) -> Self {
         let mut stats = RunnerStats {
             records_read: result.records_read,
             records_written: result.records_written,
@@ -38,7 +153,7 @@ impl RunResult {
             RunStatus::Failed
         } else if failed || stats.records_failed > 0 {
             RunStatus::Partial
-        } else if stream_mode == StreamMode::Streaming {
+        } else if result.stream_mode == StreamMode::Streaming {
             RunStatus::Failed
         } else {
             RunStatus::Success
@@ -101,6 +216,7 @@ pub struct EngineExecutionResult {
     pub records_written: usize,
     pub records_failed: usize,
     pub cancelled: bool,
+    pub stream_mode: StreamMode,
     pub elapsed: Duration,
     pub error: Option<String>,
 }
@@ -232,7 +348,7 @@ impl JobHandle {
     }
 }
 
-/// Helper for contract tests and future Coordinator integration.
+/// Helper for contract tests.
 #[cfg(test)]
 pub(crate) fn test_job_handle(repository: StateRepository) -> (JobHandle, EngineResultStore) {
     let id = JobId::new();
@@ -257,6 +373,7 @@ mod tests {
             records_written: 3,
             records_failed: 0,
             cancelled: false,
+            stream_mode: StreamMode::Batch,
             elapsed: Duration::from_millis(2),
             error: None,
         }
@@ -305,6 +422,7 @@ mod tests {
         written: usize,
         failed: usize,
         cancelled: bool,
+        stream_mode: StreamMode,
     ) -> EngineExecutionResult {
         EngineExecutionResult {
             status,
@@ -312,6 +430,7 @@ mod tests {
             records_written: written,
             records_failed: failed,
             cancelled,
+            stream_mode,
             elapsed: Duration::from_secs(2),
             error: (status == EngineExecutionStatus::Failed).then(|| "write failed".into()),
         }
@@ -319,59 +438,80 @@ mod tests {
 
     #[test]
     fn converts_engine_results_to_legacy_statuses() {
-        let success = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
+        let success = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Succeeded,
+            8,
+            0,
+            false,
             StreamMode::Batch,
-        );
+        ));
         assert_eq!(success.status, RunStatus::Success);
         assert_eq!(success.stats.throughput, 4.0);
 
-        let partial = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Failed, 8, 2, false),
+        let partial = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Failed,
+            8,
+            2,
+            false,
             StreamMode::Batch,
-        );
+        ));
         assert_eq!(partial.status, RunStatus::Partial);
         assert_eq!(partial.error.as_deref(), Some("write failed"));
 
-        let failed = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Failed, 0, 2, false),
+        let failed = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Failed,
+            0,
+            2,
+            false,
             StreamMode::Batch,
-        );
+        ));
         assert_eq!(failed.status, RunStatus::Failed);
     }
 
     #[test]
     fn streaming_completion_and_cancellation_keep_legacy_semantics() {
-        let completed = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Succeeded, 0, 0, false),
+        let completed = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Succeeded,
+            0,
+            0,
+            false,
             StreamMode::Streaming,
-        );
+        ));
         assert_eq!(completed.status, RunStatus::Failed);
         assert_eq!(
             completed.error.as_deref(),
             Some("Stream pipeline 非预期退出")
         );
 
-        let cancelled = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Cancelled, 3, 0, true),
+        let cancelled = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Cancelled,
+            3,
+            0,
+            true,
             StreamMode::Streaming,
-        );
+        ));
         assert_eq!(cancelled.status, RunStatus::Shutdown);
         assert!(cancelled.error.is_none());
 
-        let raced = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Succeeded, 3, 0, false),
+        let raced = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Succeeded,
+            3,
+            0,
+            false,
             StreamMode::Streaming,
-        );
+        ));
         assert_eq!(raced.status, RunStatus::Failed);
     }
 
     #[test]
     fn compatibility_result_json_shape_is_unchanged() {
-        let result = RunResult::from_engine(
-            execution_result(EngineExecutionStatus::Succeeded, 8, 0, false),
+        let result = RunResult::from_engine(execution_result(
+            EngineExecutionStatus::Succeeded,
+            8,
+            0,
+            false,
             StreamMode::Batch,
-        );
+        ));
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["status"], "Success");
         assert_eq!(value["stats"]["records_read"], 8);

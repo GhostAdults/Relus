@@ -12,6 +12,9 @@ pub enum JobConfigLoadError {
         path: PathBuf,
         source: anyhow::Error,
     },
+    MissingJobId {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for JobConfigLoadError {
@@ -23,6 +26,13 @@ impl fmt::Display for JobConfigLoadError {
             Self::Parse { path, .. } => {
                 write!(formatter, "配置文件解析失败: {}", path.display())
             }
+            Self::MissingJobId { path } => {
+                write!(
+                    formatter,
+                    "配置缺少 job_id 且无法从文件名推导: {}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -32,6 +42,7 @@ impl std::error::Error for JobConfigLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source.as_ref()),
+            Self::MissingJobId { .. } => None,
         }
     }
 }
@@ -45,6 +56,54 @@ pub fn load(path: &Path) -> Result<JobConfig, JobConfigLoadError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+pub fn load_with_job_id(path: &Path) -> Result<(String, JobConfig), JobConfigLoadError> {
+    let config = load(path)?;
+    let job_id = config
+        .job_id
+        .clone()
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| JobConfigLoadError::MissingJobId {
+            path: path.to_path_buf(),
+        })?;
+    Ok((job_id, config))
+}
+
+pub fn collect(
+    config_paths: Option<Vec<PathBuf>>,
+    jobs_dir: Option<PathBuf>,
+) -> Result<Vec<(String, JobConfig)>, anyhow::Error> {
+    let mut configs = Vec::new();
+    if let Some(paths) = config_paths {
+        for path in paths {
+            match load_with_job_id(&path) {
+                Ok(config) => configs.push(config),
+                Err(error) => eprintln!("Failed to load {}: {error}", path.display()),
+            }
+        }
+    }
+    if let Some(dir) = jobs_dir {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|error| anyhow::anyhow!("读取任务目录失败: {}: {error}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                match load_with_job_id(&path) {
+                    Ok(config) => configs.push(config),
+                    Err(error) => eprintln!("Failed to load {}: {error}", path.display()),
+                }
+            }
+        }
+    }
+    Ok(configs)
 }
 
 #[cfg(test)]

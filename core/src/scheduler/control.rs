@@ -154,6 +154,11 @@ pub fn load_job_config_from_path(
                 message: format!("Parse failed: {}", source),
             });
         }
+        Err(crate::job_config_loader::JobConfigLoadError::MissingJobId { path }) => {
+            return Err(SchedulerError::InvalidConfig {
+                message: format!("Missing job_id: {}", path.display()),
+            });
+        }
     };
 
     let job_id = config

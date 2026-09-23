@@ -1,5 +1,19 @@
-[workspace]
+[package]
+name = "relus"
+version = "0.1.0"
+edition.workspace = true
+authors = ["https://github.com/GhostAdults/Relus"]
 
+[[bin]]
+name = "rls"
+path = "core/src/main.rs"
+
+[dependencies]
+relus_core = { workspace = true }
+relus_cli = { workspace = true }
+clap = { workspace = true }
+
+[workspace]
 members = [
     "core",
     "engine",
@@ -14,22 +28,8 @@ members = [
 resolver = "3"
 
 [workspace.package]
-name = "relus"
-version = "0.1.0"
 edition = "2021"
-authors = ["https://github.com/GhostAdults/Relus"]
-
-[profile.release]
-# opt-level 可选值：
-# 0 - 无优化（最快编译）
-# 1 - 基本优化
-# 2 - 一些优化
-# 3 - 全部优化（最慢编译，最快运行）
-# "s" - 优化大小
-# "z" - 更激进的大小优化
-opt-level = 0     # 无优化
-lto = false       # 启用链接时优化
-codegen-units = 1 # 减少代码生成单元以提高性能
+rust-version = "1.93.0"
 
 [workspace.dependencies]
 relus_core = { path = "core" }
@@ -88,6 +88,17 @@ sqlx = { version = "0.8", default-features = false, features = [
     "rust_decimal",
 ] }
 
+[profile.release]
+# opt-level 可选值：
+# 0 - 无优化（最快编译）
+# 1 - 基本优化
+# 2 - 一些优化
+# 3 - 全部优化（最慢编译，最快运行）
+# "s" - 优化大小
+# "z" - 更激进的大小优化
+opt-level = 0     # 无优化
+lto = false       # 启用链接时优化
+codegen-units = 1 # 减少代码生成单元以提高性能
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

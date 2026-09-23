@@ -4,6 +4,9 @@ pub mod scheduler;
 pub mod server;
 pub mod starter;
 
+/// Stable application name used for per-user configuration and scheduler state.
+pub const APP_NAME: &str = "relus";
+
 // 确保 inventory::submit! 被 core 链接
 use relus_reader as _;
 use relus_writer as _;
@@ -65,6 +68,7 @@ pub fn application_coordinator() -> Arc<relus_engine::engine::coordinator::Coord
     application_state().coordinator()
 }
 
+// 读取程序内的配置文件
 fn load_embedded_defaults() -> serde_json::Value {
     let defaults_content = include_str!("../../cli/user_config/default.config.json");
     match serde_json::from_str(defaults_content) {
@@ -79,7 +83,7 @@ fn load_embedded_defaults() -> serde_json::Value {
 pub fn init_system_config() -> Option<Arc<RwLock<ConfigManager>>> {
     let mgr_arc = CONFIG_MANAGER.get_or_init(|| {
         //  创建 ConfigManager (OS 路径)
-        let mut mgr = match ConfigManager::for_os("app_trans") {
+        let mut mgr = match ConfigManager::for_os(APP_NAME) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("Failed to create ConfigManager: {}", e);
@@ -94,8 +98,8 @@ pub fn init_system_config() -> Option<Arc<RwLock<ConfigManager>>> {
             }
         };
 
-        // 优先读取用户目录下的 .config.json，不存在时 fallback 到内嵌默认值
-        let user_config_dir = relus_common::app_config::path::default_config_path("app_trans")
+        // 根据系统读取目录下的 .config.json，不存在则初始化配置。
+        let user_config_dir = relus_common::app_config::path::default_config_path(APP_NAME)
             .parent()
             .map(|p| p.join(".config.json"))
             .unwrap_or_default();
@@ -108,12 +112,12 @@ pub fn init_system_config() -> Option<Arc<RwLock<ConfigManager>>> {
                         v
                     }
                     Err(e) => {
-                        eprintln!("用户配置解析失败({}), 使用内嵌默认值", e);
+                        eprintln!("用户配置解析失败({}), 使用默认值", e);
                         load_embedded_defaults()
                     }
                 },
                 Err(e) => {
-                    eprintln!("用户配置读取失败({}), 使用内嵌默认值", e);
+                    eprintln!("用户配置读取失败({}), 使用默认值", e);
                     load_embedded_defaults()
                 }
             }
@@ -350,7 +354,7 @@ pub async fn run_scheduler(
     host: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
-    let checkpoint_dir = relus_common::app_config::path::default_config_path("app_trans")
+    let checkpoint_dir = relus_common::app_config::path::default_config_path(APP_NAME)
         .parent()
         .map(|p| p.join("checkpoints.redb"))
         .unwrap_or_else(|| PathBuf::from("checkpoints.redb"));
@@ -413,6 +417,7 @@ mod application_state_tests {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
+    use relus_engine::engine::job_master::PlanningDependencies;
     use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
     use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
 
@@ -421,7 +426,11 @@ mod application_state_tests {
     #[async_trait]
     impl DataReaderJob for EmptyReader {
         async fn split(&self, _: usize) -> Result<SplitReaderResult> {
-            unreachable!("prepared plan must not split again")
+            Ok(SplitReaderResult {
+                total_records: 0,
+                tasks: vec![],
+                stream_mode: StreamMode::Batch,
+            })
         }
 
         fn description(&self) -> String {
@@ -441,7 +450,7 @@ mod application_state_tests {
     #[async_trait]
     impl DataWriterJob for EmptyWriter {
         async fn split(&self, _: usize) -> Result<SplitWriterResult> {
-            unreachable!("empty plan needs no writer split")
+            Ok(SplitWriterResult { tasks: vec![] })
         }
 
         fn description(&self) -> String {
@@ -460,37 +469,54 @@ mod application_state_tests {
         }
     }
 
-    fn empty_plan() -> relus_engine::logic_planner::ExecutionPlan {
-        relus_engine::logic_planner::ExecutionPlan {
-            reader: Arc::new(EmptyReader),
-            writer: Arc::new(EmptyWriter),
-            pipeline: Default::default(),
-            record_builder: Arc::new(
-                relus_engine::pipeline::RecordBuilder::new(Default::default(), None)
-                    .expect("empty mapping"),
-            ),
-            reader_split: SplitReaderResult {
-                total_records: 0,
-                tasks: vec![],
-                stream_mode: StreamMode::Batch,
-            },
-            stream_mode: StreamMode::Batch,
+    struct EmptyPlanning;
+
+    impl PlanningDependencies for EmptyPlanning {
+        fn create_reader(&self, _: Arc<JobConfig>) -> Result<relus_reader::Source> {
+            Ok(Arc::new(EmptyReader))
         }
+
+        fn create_writer(&self, _: Arc<JobConfig>) -> Result<relus_writer::Sink> {
+            Ok(Arc::new(EmptyWriter))
+        }
+
+        fn build_record_builder(
+            &self,
+            config: &JobConfig,
+        ) -> Result<relus_engine::pipeline::RecordBuilder> {
+            relus_engine::pipeline::RecordBuilder::new(
+                config.column_mapping.clone(),
+                config.column_types.clone(),
+            )
+        }
+    }
+
+    fn config() -> Arc<JobConfig> {
+        Arc::new(
+            JobConfig::parse_json(
+                r#"{"source":{"name":"s","type":"fake","config":{}},"target":{"name":"t","type":"fake","config":{}},"column_mapping":{},"batch_size":1,"channel_buffer_size":1}"#,
+            )
+            .expect("valid fake config"),
+        )
     }
 
     #[tokio::test]
     async fn application_entry_adapters_observe_one_submitted_job() {
-        let app = ApplicationState::new();
-        let cli = app.coordinator();
-        let http = app.coordinator();
-        let scheduler = app.coordinator();
-        let desktop = app.coordinator();
+        let cli = Arc::new(
+            relus_engine::engine::coordinator::CoordinatorService::with_planning_dependencies(
+                relus_engine::engine::state::StateRepository::new(),
+                Arc::new(EmptyPlanning),
+            ),
+        );
+        let http = Arc::clone(&cli);
+        let scheduler = Arc::clone(&cli);
+        let desktop = Arc::clone(&cli);
 
         assert!(Arc::ptr_eq(&cli, &http));
         assert!(Arc::ptr_eq(&cli, &scheduler));
         assert!(Arc::ptr_eq(&cli, &desktop));
 
-        let submitted = cli.submit_job(empty_plan()).expect("CLI submit");
+        let submitted = cli.submit_job(config()).expect("CLI submit");
         let result = submitted.wait().await.expect("CLI wait");
         let http_handle = http.job_handle(submitted.id()).expect("HTTP query");
         let scheduler_handle = scheduler

@@ -1,92 +1,253 @@
-//! 同步任务实时进度条
-//!
-//! 基于 indicatif MultiProgress，Reader/Writer 通过 ProgressBar::inc 实时递增。
+use crate::engine::contracts::{ProgressObserver, ProgressOutcome, ProgressTopology};
+use indicatif::{
+    HumanCount, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle,
+};
+use std::io::IsTerminal;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-
-/// 进度条上下文
-pub struct ProgressContext {
-    multi: MultiProgress,
-    pub reader_bar: ProgressBar,
-    pub spacer: ProgressBar,
-    pub writer_bar: ProgressBar,
-    pub total_records: usize,
+/// Owns the entire Job display; no standalone bar may draw outside `multi`.
+pub struct IndicatifProgress {
+    multi: Option<MultiProgress>,
+    state: Mutex<DisplayState>,
 }
 
-fn bar_style() -> Result<ProgressStyle> {
-    Ok(ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/green} {pos:>7}/{len:7} {msg}",
-    )?
-    .progress_chars("█ "))
+#[derive(Default, PartialEq, Eq)]
+enum Lifecycle {
+    #[default]
+    Idle,
+    Running,
+    Finished,
 }
 
-fn spinner_style() -> Result<ProgressStyle> {
-    Ok(ProgressStyle::with_template("{msg}")?)
+#[derive(Default)]
+struct DisplayState {
+    lifecycle: Lifecycle,
+    bars: Option<Bars>,
+    read: u64,
+    written: u64,
+    total: Option<u64>,
+    topology: Option<ProgressTopology>,
+    started_at: Option<Instant>,
 }
 
-pub fn create_progress_bars(total_records: usize) -> Result<ProgressContext> {
-    let multi = MultiProgress::new();
-    multi.set_draw_target(ProgressDrawTarget::stderr()); //防止进度条被日志输出干扰，保持在终端底部显示
-    let sty = bar_style()?;
-
-    let (reader_bar, spacer, writer_bar) = if total_records > 0 {
-        let rb: ProgressBar = multi.add(ProgressBar::new(total_records as u64));
-        rb.set_style(sty.clone());
-        rb.set_prefix("Reader");
-        rb.set_message("reading");
-
-        let spacer = multi.insert_after(&rb, ProgressBar::new(1));
-        spacer.set_style(spinner_style()?);
-        spacer.set_message("-------------------------------------------------------------");
-
-        let wb = multi.insert_after(&spacer, ProgressBar::new(total_records as u64));
-        wb.set_style(sty);
-        wb.set_prefix("Writer");
-        wb.set_message("writing");
-
-        (rb, spacer, wb)
-    } else {
-        let spinner_sty = ProgressStyle::with_template("{spinner} {prefix}: {pos} events")?;
-
-        let rb = multi.add(ProgressBar::new_spinner());
-        rb.set_style(spinner_sty.clone());
-        rb.set_prefix("Reader");
-
-        let spacer = multi.insert_after(&rb, ProgressBar::new(0));
-        spacer.set_style(ProgressStyle::with_template(" ")?);
-
-        let wb = multi.insert_after(&spacer, ProgressBar::new_spinner());
-        wb.set_style(spinner_sty);
-        wb.set_prefix("Writer");
-
-        (rb, spacer, wb)
-    };
-
-    Ok(ProgressContext {
-        multi,
-        reader_bar,
-        spacer,
-        writer_bar,
-        total_records,
-    })
+struct Bars {
+    reader: ProgressBar,
+    writer: ProgressBar,
 }
 
-impl ProgressContext {
-    pub fn finish(&self) -> Result<()> {
-        if self.total_records > 0 {
-            self.reader_bar.finish_with_message("Done.");
-            self.writer_bar.finish_with_message("Done.");
-        } else {
-            self.reader_bar
-                .finish_with_message(format!("Reader: {} events", self.reader_bar.position()));
-            self.writer_bar
-                .finish_with_message(format!("Writer: {} events", self.writer_bar.position()));
+impl IndicatifProgress {
+    pub fn new() -> Self {
+        Self::with_terminal(std::io::stderr().is_terminal())
+    }
+
+    fn with_terminal(terminal: bool) -> Self {
+        Self {
+            multi: terminal.then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr())),
+            state: Mutex::new(DisplayState::default()),
         }
-        self.spacer
-            .finish_with_message("-------------------------------------------------------------");
+    }
 
-        self.multi.println("All tasks completed!")?;
-        Ok(())
+    fn advance(&self, delta: u64, reader: bool) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.lifecycle != Lifecycle::Running {
+            return;
+        }
+        // Serialize accounting with rendering: concurrent events cannot render
+        // an older position after a newer one, or change authoritative totals.
+        let count = if reader {
+            state.read = state.read.saturating_add(delta);
+            state.read
+        } else {
+            state.written = state.written.saturating_add(delta);
+            state.written
+        };
+        if let Some(bars) = &state.bars {
+            let bar = if reader { &bars.reader } else { &bars.writer };
+            bar.set_position(count);
+        }
+    }
+
+    #[cfg(test)]
+    fn counts(&self) -> (u64, u64) {
+        let state = self.state.lock().unwrap();
+        (state.read, state.written)
     }
 }
+
+impl Default for IndicatifProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProgressObserver for IndicatifProgress {
+    fn planned(&self, topology: ProgressTopology) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.lifecycle == Lifecycle::Idle {
+                state.topology = Some(topology);
+            }
+        }
+    }
+
+    fn started(&self, total_records: Option<u64>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.lifecycle != Lifecycle::Idle {
+            return;
+        }
+        let started = Instant::now();
+        state.lifecycle = Lifecycle::Running;
+        state.total = total_records;
+        state.started_at = Some(started);
+        // Non-TTY still accounts for events, but never constructs a ProgressBar.
+        let Some(multi) = &self.multi else { return };
+        let Some(reader_style) = style(total_records, started, None, None) else {
+            return;
+        };
+        let Some(writer_style) = style(total_records, started, None, state.topology) else {
+            return;
+        };
+        let reader = hidden_bar(total_records, "Reader", reader_style);
+        let writer = hidden_bar(total_records, "Writer", writer_style);
+        // Configuring a bar can draw; attach only fully configured hidden bars.
+        multi.add(reader.clone());
+        multi.add(writer.clone());
+        let _ = multi.println(
+            "Relus Data Sync\n────────────────────────────────────────────────────────────\n\n",
+        );
+        reader.tick();
+        writer.tick();
+        reader.enable_steady_tick(Duration::from_millis(100));
+        writer.enable_steady_tick(Duration::from_millis(100));
+        state.bars = Some(Bars { reader, writer });
+    }
+
+    fn records_read(&self, delta: u64) {
+        self.advance(delta, true);
+    }
+
+    fn records_sent(&self, delta: u64) {
+        self.advance(delta, false);
+    }
+
+    fn finished(&self, outcome: ProgressOutcome, records_read: u64, records_written: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.lifecycle == Lifecycle::Finished {
+            return;
+        }
+        state.lifecycle = Lifecycle::Finished;
+        state.read = records_read;
+        state.written = records_written;
+        let Some(bars) = state.bars.take() else {
+            return;
+        };
+        bars.reader.disable_steady_tick();
+        bars.writer.disable_steady_tick();
+        let started = state.started_at.unwrap_or_else(Instant::now);
+        let elapsed = started.elapsed();
+        for (bar, count, topology) in [
+            (&bars.reader, records_read, None),
+            (&bars.writer, records_written, state.topology),
+        ] {
+            if let Some(final_style) = style(state.total, started, Some(elapsed), topology) {
+                bar.set_style(final_style);
+            }
+            bar.set_position(count);
+            // finish_with_message forces position=len. Abandon preserves actual
+            // counts for failed/cancelled jobs (and successful count corrections).
+            bar.abandon_with_message(outcome_message(outcome));
+        }
+        // Drop both finished bars here, before Engine publishes its result.
+        // Indicatif leaves their last frame on screen without another printout.
+    }
+}
+
+fn hidden_bar(total: Option<u64>, prefix: &'static str, style: ProgressStyle) -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(total, ProgressDrawTarget::hidden());
+    bar.set_style(style);
+    bar.set_prefix(prefix);
+    bar
+}
+
+fn style(
+    total: Option<u64>,
+    started: Instant,
+    finished_elapsed: Option<Duration>,
+    topology: Option<ProgressTopology>,
+) -> Option<ProgressStyle> {
+    let mut template = if total.is_some() {
+        "{prefix} [{bar:30.cyan/green}] {percent:>3}% {human_pos}/{human_len} {msg}\n{stats}"
+            .to_string()
+    } else {
+        "{spinner:.cyan} {prefix} {human_pos} events {msg}\n{stats}".to_string()
+    };
+    if let Some(topology) = topology {
+        template.push_str(&format!(
+            "\n\nReaders: {}    Writers: {}    Workers: {}\n\n",
+            topology.readers, topology.writers, topology.workers,
+        ));
+    } else {
+        // An actual blank line needs two newlines: the first ends the stats
+        // line, the second adds a separate empty line to Indicatif's frame.
+        template.push_str("\n\n");
+    }
+    Some(
+        ProgressStyle::with_template(&template)
+            .ok()?
+            .progress_chars("██░")
+            .with_key(
+                "stats",
+                move |state: &ProgressState, output: &mut dyn std::fmt::Write| {
+                    let elapsed = finished_elapsed.unwrap_or_else(|| started.elapsed());
+                    let seconds = elapsed.as_secs_f64();
+                    // A sub-centisecond sample cannot provide a useful rows/s estimate.
+                    let speed = if seconds >= 0.01 {
+                        state.pos() as f64 / seconds
+                    } else {
+                        0.0
+                    };
+                    let eta = match (total, finished_elapsed) {
+                        (Some(total), None) if total > state.pos() && speed > 0.0 => {
+                            format_duration((total - state.pos()) as f64 / speed)
+                        }
+                        _ => "--:--".into(),
+                    };
+                    let _ = write!(
+                        output,
+                        "Speed: {} rows/s    Elapsed: {}    ETA: {}",
+                        HumanCount(speed.round() as u64),
+                        format_duration(seconds),
+                        eta
+                    );
+                },
+            ),
+    )
+}
+
+fn format_duration(seconds: f64) -> String {
+    let centiseconds = (seconds.max(0.0) * 100.0).round() as u64;
+    format!(
+        "{:02}:{:02}.{:02}",
+        centiseconds / 6_000,
+        (centiseconds / 100) % 60,
+        centiseconds % 100
+    )
+}
+
+fn outcome_message(outcome: ProgressOutcome) -> &'static str {
+    match outcome {
+        ProgressOutcome::Succeeded => "Done",
+        ProgressOutcome::Failed => "Failed",
+        ProgressOutcome::Cancelled => "Cancelled",
+    }
+}
+
+#[cfg(test)]
+#[path = "progress/render_tests.rs"]
+mod render_tests;

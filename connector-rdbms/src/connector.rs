@@ -12,7 +12,14 @@ pub struct RdbmsConnector {
 
 impl RdbmsConnector {
     pub async fn connect(url: &str) -> Result<Self> {
-        let kind = detect_database_kind(url, None)?;
+        Self::connect_with_kind(url, None).await
+    }
+
+    pub async fn connect_with_kind(
+        url: &str,
+        requested_kind: Option<DatabaseKind>,
+    ) -> Result<Self> {
+        let kind = detect_database_kind(url, requested_kind)?;
         let (pool_key, _) = get_db_pool(url, kind, 5, None, None).await?;
         info!("[RdbmsConnector] 已连接 {}", database_kind_name(kind));
         Ok(Self { pool_key, kind })

@@ -25,6 +25,7 @@ pub struct WorkerContext {
     pub writer: relus_writer::Sink,
     pub pipeline: relus_common::pipeline::PipelineConfig,
     pub record_builder: Arc<crate::pipeline::RecordBuilder>,
+    pub progress: Option<Arc<dyn crate::engine::contracts::ProgressObserver>>,
 }
 
 pub struct Worker;
@@ -45,6 +46,7 @@ impl Worker {
             context.record_builder,
             cancel.clone(),
             observer,
+            context.progress.clone(),
         )
         .await?;
         Ok(TaskGroupExecutionResult::from_pipeline(

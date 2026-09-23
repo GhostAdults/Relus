@@ -1,7 +1,8 @@
 [package]
 name = "relus_common"
-version = { workspace = true }
-edition = { workspace = true }
+version = "0.1.1"
+edition.workspace = true
+authors = [""]
 
 [dependencies]
 serde = { workspace = true }

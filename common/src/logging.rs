@@ -17,7 +17,7 @@ impl FormatTime for ChronoLocalTimer {
     }
 }
 
-/// Creates `logs/YYYY-MM-DD.log` next to the executable and initializes tracing.
+/// Creates `~/.relus/logs/YYYY-MM-DD.log` and initializes tracing.
 pub fn init_file_logger() -> Result<()> {
     match LOGGER_INIT_RESULT
         .get_or_init(|| initialize_file_logger().map_err(|error| error.to_string()))
@@ -28,12 +28,7 @@ pub fn init_file_logger() -> Result<()> {
 }
 
 fn initialize_file_logger() -> Result<()> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let log_dir = exe_dir.join("logs");
+    let log_dir = user_data_dir().join("logs");
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("Failed to create logs directory: {}", log_dir.display()))?;
 
@@ -71,6 +66,16 @@ fn initialize_file_logger() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolves the platform user's home directory without adding a platform-specific
+/// dependency. `HOME` is used on Unix-like systems and `USERPROFILE` on Windows.
+fn user_data_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".relus")
 }
 
 #[cfg(test)]

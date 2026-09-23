@@ -1,7 +1,8 @@
 [package]
 name = "relus_engine"
-version = { workspace = true }
-edition = { workspace = true }
+version = "0.1.1"
+edition.workspace = true
+authors = [""]
 
 [lib]
 path = "src/lib.rs"
@@ -24,6 +25,9 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+indicatif = { workspace = true, features = ["in_memory"] }
 
 [lints]
 workspace = true

@@ -12,16 +12,16 @@ Relus 已完成 Planner 与 `ExecutionPlan` 的基础重构，但执行核心仍
 
 引入 Engine 分层，并以 CoordinatorService 作为任务提交入口：
 
-`CoordinatorService.submit_job(ExecutionPlan) → JobMaster → Job/TaskGroup/Task → TaskExecutionService → Runtime → 现有 Pipeline → RunResult`
+`CoordinatorService.submit_job(JobConfig) → JobMaster preparation → RuntimeJob/TaskGroup/Task → TaskExecutionService → Runtime → Pipeline → RunResult`
 
 Engine 第一阶段建立状态、提交、静态编排和执行适配边界。`pipeline_executor.rs` 演进为 `TaskExecutionService`，负责部署 TaskGroup 并复用现有 Pipeline 执行逻辑。Runner 保留兼容入口和结果 DTO，但不再新增核心编排职责。
 
 ## User Stories
 
 1. As a Relus maintainer, I want a CoordinatorService submission boundary, so that Engine task lifecycle has one authoritative entrypoint.
-2. As a Relus maintainer, I want submission to consume an `ExecutionPlan`, so that Coordinator never parses JSON or reconstructs planning state.
+2. As a Relus maintainer, I want submission to consume a parsed `JobConfig`, so that each JobMaster owns planning and physical-plan initialization for its Job.
 3. As an operator, I want submission to return a unique JobId quickly, so that I can query or cancel a job without waiting for completion.
-4. As a Relus maintainer, I want JobMaster to initialize a runtime Job from an ExecutionPlan, so that planning and runtime instantiation remain separate.
+4. As a Relus maintainer, I want JobMaster to prepare configuration and initialize a runtime Job, so that the complete per-Job initialization lifecycle has one owner.
 5. As a Relus maintainer, I want JobMaster to create static TaskGroups and Tasks from the Reader split, so that execution does not repeat split discovery.
 6. As an operator, I want each Task to expose lifecycle state, so that submitted and actually running work are distinguishable.
 7. As an operator, I want Tasks to enter RUNNING only after their runtime resources are deployed, so that status reflects real execution.
@@ -46,9 +46,9 @@ Engine 第一阶段建立状态、提交、静态编排和执行适配边界。`
 - Add an `engine` module with the conceptual components `coordinator`, `worker`, `channel`, `checkpoint`, `retry`, `state`, `metrics`, and `runtime`.
 - Implement the first slice in this order: State, Coordinator, Runtime, Worker, Channel, Metrics, Retry, Checkpoint.
 - The first slice may provide minimal compiling interfaces for capabilities that are not yet active, but must not claim behavior that is not implemented.
-- `CoordinatorService.submit_job(ExecutionPlan)` is the Engine submission boundary. Rust APIs use `snake_case`; the product concept remains submitJob.
+- `CoordinatorService.submit_job(JobConfig)` is the Engine submission boundary. Rust APIs use `snake_case`; the product concept remains submitJob.
 - Submission generates a unique JobId, registers the Job in an in-memory state repository, and schedules asynchronous initialization. It does not wait for full completion.
-- `JobMaster::initialize` consumes a single-use ExecutionPlan and statically creates Job, TaskGroup, TaskGroup pairings, and initial CREATED state.
+- `JobMaster::initialize` consumes the parsed JobConfig, prepares resources once, and creates the RuntimeJob, TaskGroup pairings, and initial CREATED state.
 - TaskGroup creation uses the prepared Reader split and current Writer split/pairing rules. Workers never call Reader split again.
 - `pipeline_executor.rs` evolves into `TaskExecutionService`, which accepts prepared TaskGroups and adapts them to the existing Pipeline executor. The read/transform/channel/write loop is not rewritten in this phase.
 - The runtime model is `Job → TaskGroup[] → Task[]`, with Source and Sink represented by current Reader and Writer tasks. RecordBuilder remains the internal Transform implementation; no independent Transform trait or DAG is added yet.
@@ -69,7 +69,7 @@ Engine 第一阶段建立状态、提交、静态编排和执行适配边界。`
 
 ## Testing Decisions
 
-- Test the highest available Engine behavior seam: submission of a fake `ExecutionPlan` to Coordinator and observation of Job/Task lifecycle and final `RunResult`.
+- Test the highest available Engine behavior seam: submission of a fake `JobConfig` through injected planning dependencies and observation of Job/Task lifecycle and final `RunResult`.
 - Use injected fake Reader/Writer and deterministic TaskExecutionService/Runtime seams; tests must not require a database, API, network, or global registry mutation.
 - Verify unique JobId generation, initial registration, asynchronous initialization, and JobMaster static TaskGroup/Task creation.
 - Verify lifecycle transitions through RUNNING and each terminal state, including initialization failure and cancellation.
@@ -97,14 +97,13 @@ Engine 第一阶段建立状态、提交、静态编排和执行适配边界。`
 
 ## Plan terminology
 
-`Planner::prepare` produces the Prepared Execution Plan represented by the
-`ExecutionPlan` type. It validates configuration, creates Reader/Writer
-resources, builds the RecordBuilder and performs the one-time Reader split.
-
-`JobMaster` consumes that prepared plan and produces `RuntimeJob`, the actual
-resource-bound physical execution plan. `RuntimeTaskGroup` is a deployable
-physical task group and `RuntimeTask` is a concrete paired Reader/Writer
-execution unit. Writer splitting and task pairing remain JobMaster concerns.
+`JobMaster` validates configuration, creates Reader/Writer resources, builds
+the RecordBuilder, and performs the one-time Reader split. Its prepared
+intermediate remains private to the module. JobMaster then produces
+`RuntimeJob`, the actual resource-bound physical execution plan.
+`RuntimeTaskGroup` is a deployable physical task group and `RuntimeTask` is a
+concrete paired Reader/Writer execution unit. Writer splitting and task pairing
+also remain JobMaster concerns.
 
 The future architectural direction is to separate immutable
 `PhysicalExecutionPlan` topology from `RuntimeJobState`, while `RuntimeJob`
@@ -116,8 +115,8 @@ The current workspace keeps explicit responsibilities in one crate:
 
 | Module | Responsibility |
 | --- | --- |
-| `core::planner` | Parse/validate `JobConfig`, create resources, build `RecordBuilder`, perform the single Reader split, and produce `ExecutionPlan`. |
-| `core::engine` | Consume `ExecutionPlan`, build resource-bound `RuntimeJob` through `JobMaster`, manage lifecycle, deploy groups, and aggregate outcomes. |
+| `engine::job_master` | Validate `JobConfig`, create resources, build `RecordBuilder`, perform the single Reader split, and produce the resource-bound `RuntimeJob`. |
+| `engine` | Let a per-Job `JobMaster` prepare and build `RuntimeJob`, manage lifecycle, deploy groups, and aggregate outcomes. |
 | `pipeline` | Execute prepared Reader/Writer pairs through RecordBuilder and channels; it does not parse configuration or create physical topology. |
 | `core::runner` | Compatibility adapter exposing `RunResult`, `RunStatus`, `RunnerStats`, and `start_task`; delegates to Planner and Coordinator/Engine. |
 | `core::scheduler` | Upper-layer application orchestration for schedules, control, cancellation, and fresh plan submission; it is not part of Engine. |
@@ -125,7 +124,7 @@ The current workspace keeps explicit responsibilities in one crate:
 
 Production flow:
 
-`service/CLI/HTTP/Desktop → serve::start_job → runner::start_task → Planner::prepare → CoordinatorService → JobMaster → TaskExecutionService → Worker → Pipeline Executor`
+`service/CLI/HTTP/Desktop → starter::start_job → CoordinatorService → per-Job JobMaster → RuntimeJob → TaskExecutionService → Worker → Pipeline Executor`
 
 Engine owns job lifecycle, physical deployment, cancellation propagation, and
 result aggregation. Scheduler owns application scheduling policy. This is an
@@ -137,8 +136,8 @@ Intended dependency direction:
 
 `relus_core → relus_engine → pipeline / reader / writer / common`
 
-`relus_core` retains Planner, Scheduler, Runner compatibility, services, CLI,
-and HTTP concerns. `relus_engine` contains Coordinator, JobMaster, Runtime,
+`relus_core` retains Scheduler, compatibility services, CLI, and HTTP concerns.
+`relus_engine` contains configuration preparation, Coordinator, JobMaster, Runtime,
 Worker, and TaskExecutionService. Engine must not depend on Scheduler, CLI, HTTP,
 or Runner compatibility DTOs.
 
@@ -159,7 +158,7 @@ introduce `LogicalDag`, `PipelineList`, `SubPlan`, `PhysicalExecutionPlan`, or
 
 ## Further Notes
 
-- This specification builds on the completed Planner and `ExecutionPlan` work. Planner remains the configuration and preparation boundary; Engine is the runtime lifecycle boundary.
+- This specification builds on the completed planning work. JobMaster now owns configuration preparation and physical-plan construction; Coordinator remains the runtime lifecycle interface.
 - The first implementation should prefer adapters over moving large blocks of Pipeline code. Physical relocation can happen after lifecycle behavior is proven.
 - The current baseline is `main` at commit `fc9f215d7b1f16c60e7c580e67b0c6939fa9057b`; the worktree may contain unrelated uncommitted changes that must remain untouched.
 
@@ -169,7 +168,7 @@ SPEC READY
 - Source: https://github.com/GhostAdults/Relus/issues/8 and docs/specs/execution-engine-foundation.md
 - Repository: E:/github/Relus
 - Baseline: main at fc9f215d7b1f16c60e7c580e67b0c6939fa9057b
-- Test seam: CoordinatorService submission with fake ExecutionPlan, lifecycle state observation, and compatible RunResult aggregation
+- Test seam: CoordinatorService submission with fake planning dependencies, lifecycle state observation, and compatible RunResult aggregation
 - Non-goals: rewriting Pipeline algorithms, implementing Retry/Checkpoint/Metrics persistence, changing public result DTOs, real service integration
 - External authority: local implementation and validation only; commit, push, review, deploy, production data, and real-service access remain ungranted
 - Next route: to-tickets

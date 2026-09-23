@@ -4,20 +4,17 @@ use relus_common::app_config::value::ConfigValue;
 use relus_common::job_config::JobConfig;
 use relus_common::resp::ApiResp;
 use relus_common::{CreateConfigReq, UpdateConfigReq};
-use relus_reader::StreamMode;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 use relus_engine::engine::{
-    contracts::{JobHandle, RunResult},
+    contracts::{ExecutionOptions, JobHandle, JobSubmission, RunResult},
     coordinator::CoordinatorService,
 };
-use relus_engine::logic_planner::{Planner, PlanningDependencies, RegistryPlanningDependencies};
 
-/// Prepares and synchronously waits for one synchronization job.
+/// Submits and synchronously waits for one synchronization job.
 pub async fn start_task(
     config: Arc<JobConfig>,
     cancel_token: CancellationToken,
@@ -30,30 +27,21 @@ pub(crate) async fn start_task_with_coordinator(
     cancel_token: CancellationToken,
     coordinator: Arc<CoordinatorService>,
 ) -> anyhow::Result<RunResult> {
-    start_task_with(
-        config,
-        cancel_token,
-        &RegistryPlanningDependencies,
-        coordinator,
-    )
-    .await
+    let handle = coordinator.submit_job(JobSubmission::new(config))?;
+    wait_for_run_result(handle, cancel_token).await
 }
 
-async fn start_task_with(
-    config: Arc<JobConfig>,
-    cancel_token: CancellationToken,
-    planning: &dyn PlanningDependencies,
-    coordinator: Arc<CoordinatorService>,
+pub async fn start_job_with_options(
+    cfg: JobConfig,
+    options: ExecutionOptions,
 ) -> anyhow::Result<RunResult> {
-    let plan = Planner::prepare_with(config, planning).await?;
-    let (handle, stream_mode) = submit_prepared_job(plan, coordinator)?;
-
-    wait_for_run_result(handle, stream_mode, cancel_token).await
+    let handle = crate::application_coordinator()
+        .submit_job(JobSubmission::new(Arc::new(cfg)).with_options(options))?;
+    wait_for_run_result(handle, CancellationToken::new()).await
 }
 
 async fn wait_for_run_result(
     handle: JobHandle,
-    stream_mode: StreamMode,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<RunResult> {
     let result = tokio::select! {
@@ -63,46 +51,12 @@ async fn wait_for_run_result(
             handle.wait().await.map_err(anyhow::Error::msg)?
         }
     };
-    Ok(RunResult::from_engine(result, stream_mode))
+    Ok(RunResult::from_engine(result))
 }
 
-pub(crate) async fn submit_job_with(
-    config: Arc<JobConfig>,
-    planning: &dyn PlanningDependencies,
-    coordinator: Arc<CoordinatorService>,
-) -> anyhow::Result<JobHandle> {
-    let plan = Planner::prepare_with(config, planning).await?;
-    let (handle, _) = submit_prepared_job(plan, coordinator)?;
-    Ok(handle)
-}
-
-fn submit_prepared_job(
-    plan: relus_engine::logic_planner::ExecutionPlan,
-    coordinator: Arc<CoordinatorService>,
-) -> anyhow::Result<(JobHandle, StreamMode)> {
-    let stream_mode = plan.stream_mode;
-
-    info!(
-        "[start_task] {} 模式, {} 个任务, 总记录数 {}",
-        match stream_mode {
-            StreamMode::Batch => "Batch",
-            StreamMode::Streaming => "Streaming",
-        },
-        plan.reader_split.tasks.len(),
-        plan.reader_split.total_records
-    );
-
-    Ok((coordinator.submit_job(plan)?, stream_mode))
-}
-
-/// Plans and submits a job to the shared application Engine without waiting.
+/// Submits a configuration to the shared application Engine without waiting.
 pub async fn submit_job(config: Arc<JobConfig>) -> anyhow::Result<JobHandle> {
-    submit_job_with(
-        config,
-        &RegistryPlanningDependencies,
-        crate::application_coordinator(),
-    )
-    .await
+    Ok(crate::application_coordinator().submit_job(config)?)
 }
 
 pub fn job_handle(id: relus_engine::engine::state::JobId) -> Option<JobHandle> {
@@ -269,7 +223,10 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use relus_common::{job_config::WriteMode, PipelineMessage};
-    use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult};
+    use relus_engine::engine::job_master::PlanningDependencies;
+    use relus_reader::{
+        DataReaderJob, DataReaderTask, JsonStream, ReadTask, SplitReaderResult, StreamMode,
+    };
     use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
     use tokio::sync::mpsc;
 
@@ -391,18 +348,22 @@ mod tests {
         Arc::new(JobConfig::parse_json(JOB).expect("valid fake job"))
     }
 
+    fn coordinator(planning: FakePlanning) -> Arc<CoordinatorService> {
+        Arc::new(CoordinatorService::with_planning_dependencies(
+            relus_engine::engine::state::StateRepository::new(),
+            Arc::new(planning),
+        ))
+    }
+
     #[tokio::test]
     async fn bootstrap_waits_for_batch_success() {
-        let result = start_task_with(
+        let result = start_task_with_coordinator(
             config(),
             CancellationToken::new(),
-            &FakePlanning {
+            coordinator(FakePlanning {
                 mode: StreamMode::Batch,
                 pending: false,
-            },
-            Arc::new(CoordinatorService::new(
-                relus_engine::engine::state::StateRepository::new(),
-            )),
+            }),
         )
         .await
         .expect("batch result");
@@ -414,16 +375,13 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_maps_streaming_natural_exit_to_failed() {
-        let result = start_task_with(
+        let result = start_task_with_coordinator(
             config(),
             CancellationToken::new(),
-            &FakePlanning {
+            coordinator(FakePlanning {
                 mode: StreamMode::Streaming,
                 pending: false,
-            },
-            Arc::new(CoordinatorService::new(
-                relus_engine::engine::state::StateRepository::new(),
-            )),
+            }),
         )
         .await
         .expect("stream result");
@@ -437,16 +395,13 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_cancels_streaming_job_and_waits_for_shutdown() {
         let token = CancellationToken::new();
-        let task = tokio::spawn(start_task_with(
+        let task = tokio::spawn(start_task_with_coordinator(
             config(),
             token.clone(),
-            &FakePlanning {
+            coordinator(FakePlanning {
                 mode: StreamMode::Streaming,
                 pending: true,
-            },
-            Arc::new(CoordinatorService::new(
-                relus_engine::engine::state::StateRepository::new(),
-            )),
+            }),
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -464,19 +419,11 @@ mod tests {
 
     #[tokio::test]
     async fn async_submit_exposes_shared_handle_snapshot_and_repeatable_result() {
-        let coordinator = Arc::new(CoordinatorService::new(
-            relus_engine::engine::state::StateRepository::new(),
-        ));
-        let handle = submit_job_with(
-            config(),
-            &FakePlanning {
-                mode: StreamMode::Batch,
-                pending: false,
-            },
-            Arc::clone(&coordinator),
-        )
-        .await
-        .expect("submit handle");
+        let coordinator = coordinator(FakePlanning {
+            mode: StreamMode::Batch,
+            pending: false,
+        });
+        let handle = coordinator.submit_job(config()).expect("submit handle");
         let first = handle.wait().await.expect("first result");
         let shared = coordinator
             .job_handle(handle.id())
@@ -488,23 +435,15 @@ mod tests {
 
     #[tokio::test]
     async fn late_cancellation_does_not_override_completed_success() {
-        let coordinator = Arc::new(CoordinatorService::new(
-            relus_engine::engine::state::StateRepository::new(),
-        ));
-        let handle = submit_job_with(
-            config(),
-            &FakePlanning {
-                mode: StreamMode::Batch,
-                pending: false,
-            },
-            coordinator,
-        )
-        .await
-        .expect("submit handle");
+        let coordinator = coordinator(FakePlanning {
+            mode: StreamMode::Batch,
+            pending: false,
+        });
+        let handle = coordinator.submit_job(config()).expect("submit handle");
         let _ = handle.wait().await.expect("completed result");
         let token = CancellationToken::new();
         token.cancel();
-        let result = wait_for_run_result(handle, StreamMode::Batch, token)
+        let result = wait_for_run_result(handle, token)
             .await
             .expect("compatibility result");
         assert_eq!(

@@ -114,6 +114,7 @@ impl TaskExecutionService {
         }
     }
 
+    /// 部署 TaskGroup
     pub fn deploy(
         &self,
         group: RuntimeTaskGroup,
@@ -274,6 +275,7 @@ impl TaskExecutionService {
                     std::collections::BTreeMap::new(),
                     None,
                 )?),
+                progress: None,
             },
             cancel,
         )
@@ -475,6 +477,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
+                    progress: None,
                 },
                 CancellationToken::new(),
             )
@@ -557,6 +560,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
+                    progress: None,
                 },
                 token.clone(),
             )
