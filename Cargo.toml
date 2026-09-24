@@ -77,6 +77,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 inventory = "0.3"
 mysql_cdc = "0.2"
+openssl = { version = "0.10", features = ["vendored"] }
 cron = "0.15"
 rustyline = "15"
 sqlx = { version = "0.8", default-features = false, features = [
