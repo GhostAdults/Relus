@@ -18,7 +18,7 @@ mysql_async = { version = "=0.37.1", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
 tokio-util = "0.7"
 uuid = "1"
 

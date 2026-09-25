@@ -611,13 +611,9 @@ fn map_mysql_error(error: mysql_async::Error) -> ReplicationError {
     let (kind, retryable) = match &error {
         mysql_async::Error::Io(mysql_async::IoError::Tls(_)) => (ReplicationErrorKind::Tls, false),
         mysql_async::Error::Io(_) => (ReplicationErrorKind::Network, true),
-        mysql_async::Error::Server(server) if matches!(server.code, 1044 | 1045 | 1698) => {
-            (ReplicationErrorKind::Authentication, false)
+        mysql_async::Error::Server(server) => {
+            return classify_mysql_server_error(server.code, message)
         }
-        mysql_async::Error::Server(server) if server.code == 1236 => {
-            (ReplicationErrorKind::BinlogPurged, false)
-        }
-        mysql_async::Error::Server(_) => (ReplicationErrorKind::Protocol, false),
         mysql_async::Error::Driver(mysql_async::DriverError::UnknownAuthPlugin { .. }) => {
             (ReplicationErrorKind::Authentication, false)
         }
@@ -628,6 +624,16 @@ fn map_mysql_error(error: mysql_async::Error) -> ReplicationError {
         mysql_async::Error::Url(_) => (ReplicationErrorKind::Configuration, false),
         mysql_async::Error::Driver(_) => (ReplicationErrorKind::Protocol, false),
         mysql_async::Error::Other(_) => (ReplicationErrorKind::Network, true),
+    };
+    ReplicationError::new(kind, retryable, message)
+}
+
+pub fn classify_mysql_server_error(code: u16, message: impl Into<String>) -> ReplicationError {
+    let (kind, retryable) = match code {
+        1044 | 1045 | 1698 => (ReplicationErrorKind::Authentication, false),
+        1040 | 1053 | 1203 => (ReplicationErrorKind::ServerUnavailable, true),
+        1236 => (ReplicationErrorKind::BinlogPurged, false),
+        _ => (ReplicationErrorKind::Protocol, false),
     };
     ReplicationError::new(kind, retryable, message)
 }

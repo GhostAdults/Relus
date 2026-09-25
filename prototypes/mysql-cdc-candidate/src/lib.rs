@@ -6,8 +6,8 @@ pub mod transaction;
 pub mod verification;
 
 pub use adapter::{
-    consume_until_cancelled, MySqlAsyncReplicationClient, MySqlConnectionConfig,
-    MySqlReplicationClient, TlsMode,
+    classify_mysql_server_error, consume_until_cancelled, MySqlAsyncReplicationClient,
+    MySqlConnectionConfig, MySqlReplicationClient, TlsMode,
 };
 pub use envelope::{
     CdcEnvelope, CdcMessage, CdcOffset, CdcOperation, CdcValue, RowChange, TransactionCommit,

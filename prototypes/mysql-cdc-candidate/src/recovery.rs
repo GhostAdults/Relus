@@ -1,8 +1,9 @@
-use std::{fs, io::Write, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
 use mysql_async::{GnoInterval, Sid};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     CdcEnvelope, CdcMessage, CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig,
@@ -42,11 +43,13 @@ impl PersistentTestCheckpoint {
     }
 }
 
-pub trait TestCheckpointStore {
-    fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError>;
-    fn save(&mut self, checkpoint: &PersistentTestCheckpoint) -> Result<(), ReplicationError>;
+#[async_trait]
+pub trait TestCheckpointStore: Send {
+    async fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError>;
+    async fn save(&mut self, checkpoint: &PersistentTestCheckpoint)
+        -> Result<(), ReplicationError>;
 
-    fn save_interrupted(
+    async fn save_interrupted(
         &mut self,
         _checkpoint: &PersistentTestCheckpoint,
     ) -> Result<(), ReplicationError> {
@@ -135,7 +138,7 @@ where
     S: PrototypeSink,
     C: TestCheckpointStore,
 {
-    let loaded = checkpoints.load()?;
+    let loaded = checkpoints.load().await?;
     if loaded.as_ref().is_some_and(|checkpoint| {
         checkpoint.phase == CheckpointPhase::SnapshotComplete
             && failpoint == Some(RecoveryFailpoint::AfterSnapshotBeforeIncrementalHandoff)
@@ -156,7 +159,7 @@ where
             Ok(client) => client,
             Err(error) if should_reconnect(&error, reconnects, options.max_reconnects) => {
                 reconnects += 1;
-                tokio::time::sleep(options.reconnect_delay).await;
+                wait_before_reconnect(options.reconnect_delay, reconnects).await;
                 continue;
             }
             Err(error) => return Err(error),
@@ -168,6 +171,19 @@ where
             let event =
                 match tokio::time::timeout(options.heartbeat_timeout, client.next_event()).await {
                     Ok(Ok(Some(event))) => event,
+                    Ok(Ok(None)) if assembler.has_active_transaction() => {
+                        if reconnects >= options.max_reconnects {
+                            return Err(ReplicationError::new(
+                                ReplicationErrorKind::Network,
+                                false,
+                                "replication stream ended during an incomplete transaction",
+                            ));
+                        }
+                        reconnects += 1;
+                        let _ = client.close().await;
+                        wait_before_reconnect(options.reconnect_delay, reconnects).await;
+                        break;
+                    }
                     Ok(Ok(None)) => {
                         client.close().await?;
                         return Ok(());
@@ -176,7 +192,7 @@ where
                         if should_reconnect(&error, reconnects, options.max_reconnects) {
                             reconnects += 1;
                             let _ = client.close().await;
-                            tokio::time::sleep(options.reconnect_delay).await;
+                            wait_before_reconnect(options.reconnect_delay, reconnects).await;
                             break;
                         }
                         return Err(error);
@@ -191,7 +207,7 @@ where
                         }
                         reconnects += 1;
                         let _ = client.close().await;
-                        tokio::time::sleep(options.reconnect_delay).await;
+                        wait_before_reconnect(options.reconnect_delay, reconnects).await;
                         break;
                     }
                 };
@@ -228,9 +244,9 @@ where
                             CheckpointPhase::Streaming,
                         )?;
                         if failpoint == Some(RecoveryFailpoint::DuringCheckpoint) {
-                            return checkpoints.save_interrupted(&checkpoint);
+                            return checkpoints.save_interrupted(&checkpoint).await;
                         }
-                        checkpoints.save(&checkpoint)?;
+                        checkpoints.save(&checkpoint).await?;
                         confirmed_offset = checkpoint.confirmed_offset;
                         transaction_rows = 0;
                         reconnects = 0;
@@ -248,15 +264,31 @@ fn should_reconnect(error: &ReplicationError, reconnects: u32, limit: u32) -> bo
     error.retryable && reconnects < limit
 }
 
+async fn wait_before_reconnect(base_delay: Duration, reconnect_number: u32) {
+    if base_delay.is_zero() {
+        return;
+    }
+    let exponent = reconnect_number.saturating_sub(1).min(16);
+    let exponential = base_delay.saturating_mul(1_u32 << exponent);
+    let jitter_percent = 80
+        + std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            % 41;
+    tokio::time::sleep(exponential.saturating_mul(jitter_percent) / 100).await;
+}
+
 impl FileCheckpointStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
+#[async_trait]
 impl TestCheckpointStore for FileCheckpointStore {
-    fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError> {
-        let bytes = match fs::read(&self.path) {
+    async fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError> {
+        let bytes = match tokio::fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(checkpoint_error(error.to_string())),
@@ -272,27 +304,32 @@ impl TestCheckpointStore for FileCheckpointStore {
         Ok(Some(checkpoint))
     }
 
-    fn save(&mut self, checkpoint: &PersistentTestCheckpoint) -> Result<(), ReplicationError> {
-        let temp_path = self.write_temporary(checkpoint)?;
-        fs::rename(&temp_path, &self.path).map_err(|error| checkpoint_error(error.to_string()))?;
-        Ok(())
-    }
-
-    fn save_interrupted(
+    async fn save(
         &mut self,
         checkpoint: &PersistentTestCheckpoint,
     ) -> Result<(), ReplicationError> {
-        self.write_temporary(checkpoint)?;
+        let temp_path = self.write_temporary(checkpoint).await?;
+        tokio::fs::rename(&temp_path, &self.path)
+            .await
+            .map_err(|error| checkpoint_error(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn save_interrupted(
+        &mut self,
+        checkpoint: &PersistentTestCheckpoint,
+    ) -> Result<(), ReplicationError> {
+        self.write_temporary(checkpoint).await?;
         Err(failpoint_error("failpoint during checkpoint write"))
     }
 }
 
 impl FileCheckpointStore {
-    fn write_temporary(
+    async fn write_temporary(
         &self,
         checkpoint: &PersistentTestCheckpoint,
     ) -> Result<PathBuf, ReplicationError> {
-        if let Some(current) = self.load()? {
+        if let Some(current) = self.load().await? {
             if checkpoint.sequence <= current.sequence {
                 return Err(checkpoint_error(
                     "checkpoint sequence must advance monotonically",
@@ -300,15 +337,21 @@ impl FileCheckpointStore {
             }
         }
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|error| checkpoint_error(error.to_string()))?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| checkpoint_error(error.to_string()))?;
         }
         let bytes = serde_json::to_vec_pretty(checkpoint)
             .map_err(|error| checkpoint_error(error.to_string()))?;
         let temp_path = self.path.with_extension("json.tmp");
-        let mut file =
-            fs::File::create(&temp_path).map_err(|error| checkpoint_error(error.to_string()))?;
+        let mut file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|error| checkpoint_error(error.to_string()))?;
         file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
+            .await
+            .map_err(|error| checkpoint_error(error.to_string()))?;
+        file.sync_all()
+            .await
             .map_err(|error| checkpoint_error(error.to_string()))?;
         Ok(temp_path)
     }

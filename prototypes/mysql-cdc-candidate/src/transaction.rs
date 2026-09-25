@@ -53,6 +53,10 @@ struct ActiveTransaction {
 }
 
 impl TransactionAssembler {
+    pub fn has_active_transaction(&self) -> bool {
+        self.active.is_some()
+    }
+
     pub fn push(
         &mut self,
         event: RawReplicationEvent,

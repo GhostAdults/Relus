@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use relus_mysql_cdc_candidate::{
-    run_recovery_loop, CdcEnvelope, CdcOffset, CdcOperation, CdcValue, CheckpointPhase,
-    FileCheckpointStore, MySqlReplicationClient, PersistentTestCheckpoint, PrototypeSink,
-    RawReplicationEvent, RecoveryClientFactory, RecoveryFailpoint, RecoveryOptions,
+    classify_mysql_server_error, run_recovery_loop, CdcEnvelope, CdcOffset, CdcOperation, CdcValue,
+    CheckpointPhase, FileCheckpointStore, MySqlReplicationClient, PersistentTestCheckpoint,
+    PrototypeSink, RawReplicationEvent, RecoveryClientFactory, RecoveryFailpoint, RecoveryOptions,
     ReplicationError, ReplicationErrorKind, RowChange, TestCheckpointStore, TransactionCommit,
 };
 
-#[test]
-fn file_position_and_gtid_checkpoints_persist_as_resume_offsets(
+#[tokio::test]
+async fn file_position_and_gtid_checkpoints_persist_as_resume_offsets(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().join("checkpoint.json");
@@ -24,8 +24,8 @@ fn file_position_and_gtid_checkpoints_persist_as_resume_offsets(
         CheckpointPhase::Streaming,
     )?;
 
-    store.save(&file_checkpoint)?;
-    assert_eq!(store.load()?, Some(file_checkpoint));
+    store.save(&file_checkpoint).await?;
+    assert_eq!(store.load().await?, Some(file_checkpoint));
 
     let gtid_checkpoint = PersistentTestCheckpoint::new(
         2,
@@ -38,8 +38,8 @@ fn file_position_and_gtid_checkpoints_persist_as_resume_offsets(
         CheckpointPhase::Streaming,
     )?;
 
-    store.save(&gtid_checkpoint)?;
-    let Some(loaded) = store.load()? else {
+    store.save(&gtid_checkpoint).await?;
+    let Some(loaded) = store.load().await? else {
         return Err("checkpoint should exist".into());
     };
     assert_eq!(loaded.sequence, 2);
@@ -60,12 +60,16 @@ struct MemoryCheckpointStore {
     checkpoint: Option<PersistentTestCheckpoint>,
 }
 
+#[async_trait]
 impl TestCheckpointStore for MemoryCheckpointStore {
-    fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError> {
+    async fn load(&self) -> Result<Option<PersistentTestCheckpoint>, ReplicationError> {
         Ok(self.checkpoint.clone())
     }
 
-    fn save(&mut self, checkpoint: &PersistentTestCheckpoint) -> Result<(), ReplicationError> {
+    async fn save(
+        &mut self,
+        checkpoint: &PersistentTestCheckpoint,
+    ) -> Result<(), ReplicationError> {
         self.checkpoint = Some(checkpoint.clone());
         Ok(())
     }
@@ -300,7 +304,7 @@ async fn unconfirmed_transaction_replays_with_stable_identity_and_no_checkpoint_
     )
     .await;
     assert!(first.is_err());
-    assert!(checkpoints.load()?.is_none());
+    assert!(checkpoints.load().await?.is_none());
 
     run_recovery_loop(
         &mut factory,
@@ -321,7 +325,8 @@ async fn unconfirmed_transaction_replays_with_stable_identity_and_no_checkpoint_
     );
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(commit_offset)
     );
@@ -360,7 +365,8 @@ async fn confirmed_transaction_is_retained_when_the_next_transaction_replays(
     assert_eq!(first_factory.starts, vec![initial.clone()]);
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(first_commit.clone())
     );
@@ -392,7 +398,8 @@ async fn confirmed_transaction_is_retained_when_the_next_transaction_replays(
     assert!(result.is_err());
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(first_commit.clone())
     );
@@ -424,9 +431,59 @@ async fn confirmed_transaction_is_retained_when_the_next_transaction_replays(
     );
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(second_commit)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn eof_during_transaction_reconnects_and_replays_from_confirmed_checkpoint(
+) -> Result<(), ReplicationError> {
+    let initial = CdcOffset::Position {
+        file: "mysql-bin.000001".to_owned(),
+        position: 4,
+    };
+    let row_offset = initial.with_position("mysql-bin.000001", 300);
+    let commit_offset = initial.with_position("mysql-bin.000001", 340);
+    let partial_transaction = transaction(row_offset.clone(), commit_offset.clone(), 3)
+        .into_iter()
+        .take(2)
+        .collect();
+    let full_transaction = transaction(row_offset, commit_offset.clone(), 3);
+    let mut factory = ScriptFactory {
+        scripts: VecDeque::from([partial_transaction, full_transaction]),
+        starts: Vec::new(),
+    };
+    let mut sink = RecordingSink::default();
+    let mut checkpoints = MemoryCheckpointStore::default();
+
+    run_recovery_loop(
+        &mut factory,
+        &mut sink,
+        &mut checkpoints,
+        initial.clone(),
+        RecoveryOptions {
+            max_reconnects: 1,
+            reconnect_delay: Duration::ZERO,
+            heartbeat_timeout: Duration::from_secs(1),
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(factory.starts, vec![initial.clone(), initial]);
+    assert_eq!(sink.event_ids.len(), 2);
+    assert_eq!(sink.event_ids[0], sink.event_ids[1]);
+    assert_eq!(sink.acknowledged, vec![commit_offset.clone()]);
+    assert_eq!(
+        checkpoints
+            .load()
+            .await?
+            .map(|checkpoint| checkpoint.confirmed_offset),
+        Some(commit_offset)
     );
     Ok(())
 }
@@ -497,7 +554,8 @@ async fn retryable_errors_reconnect_from_last_confirmed_checkpoint_but_permanent
     assert_eq!(factory.starts, vec![initial, confirmed.clone()]);
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(confirmed)
     );
@@ -576,7 +634,7 @@ async fn exit_before_sink_write_replays_without_advancing_checkpoint(
     .await;
     assert!(result.is_err());
     assert!(sink.event_ids.is_empty());
-    assert!(checkpoints.load()?.is_none());
+    assert!(checkpoints.load().await?.is_none());
 
     run_recovery_loop(
         &mut factory,
@@ -591,7 +649,8 @@ async fn exit_before_sink_write_replays_without_advancing_checkpoint(
     assert_eq!(sink.event_ids.len(), 1);
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(commit_offset)
     );
@@ -618,11 +677,13 @@ async fn exit_during_checkpoint_keeps_previous_checkpoint_and_replays(
     let temp_dir = tempfile::tempdir()?;
     let checkpoint_path = temp_dir.path().join("checkpoint.json");
     let mut checkpoints = FileCheckpointStore::new(checkpoint_path.clone());
-    checkpoints.save(&PersistentTestCheckpoint::new(
-        1,
-        initial.clone(),
-        CheckpointPhase::Streaming,
-    )?)?;
+    checkpoints
+        .save(&PersistentTestCheckpoint::new(
+            1,
+            initial.clone(),
+            CheckpointPhase::Streaming,
+        )?)
+        .await?;
 
     let result = run_recovery_loop(
         &mut factory,
@@ -636,7 +697,8 @@ async fn exit_during_checkpoint_keeps_previous_checkpoint_and_replays(
     assert!(result.is_err());
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(initial.clone())
     );
@@ -656,7 +718,8 @@ async fn exit_during_checkpoint_keeps_previous_checkpoint_and_replays(
     assert_eq!(sink.event_ids[0], sink.event_ids[1]);
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(commit_offset)
     );
@@ -694,7 +757,7 @@ async fn exit_during_large_transaction_replays_all_rows_without_partial_checkpoi
     assert!(result.is_err());
     assert_eq!(sink.event_ids.len(), 2);
     assert!(sink.acknowledged.is_empty());
-    assert!(checkpoints.load()?.is_none());
+    assert!(checkpoints.load().await?.is_none());
 
     run_recovery_loop(
         &mut factory,
@@ -711,7 +774,8 @@ async fn exit_during_large_transaction_replays_all_rows_without_partial_checkpoi
     assert_eq!(sink.event_ids[1], sink.event_ids[3]);
     assert_eq!(
         checkpoints
-            .load()?
+            .load()
+            .await?
             .map(|checkpoint| checkpoint.confirmed_offset),
         Some(commit_offset)
     );
@@ -907,11 +971,12 @@ async fn sink_rejection_prevents_checkpoint_advance() {
     assert!(checkpoints.checkpoint.is_none());
 }
 
-#[test]
-fn interrupted_file_checkpoint_keeps_the_previous_atomic_record(
+#[tokio::test]
+async fn interrupted_file_checkpoint_keeps_the_previous_atomic_record(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempfile::tempdir()?;
-    let mut store = FileCheckpointStore::new(temp_dir.path().join("checkpoint.json"));
+    let checkpoint_path = temp_dir.path().join("checkpoint.json");
+    let mut store = FileCheckpointStore::new(checkpoint_path.clone());
     let first = PersistentTestCheckpoint::new(
         1,
         CdcOffset::Position {
@@ -928,10 +993,15 @@ fn interrupted_file_checkpoint_keeps_the_previous_atomic_record(
         },
         CheckpointPhase::Streaming,
     )?;
-    store.save(&first)?;
+    store.save(&first).await?;
 
-    assert!(store.save_interrupted(&second).is_err());
-    assert_eq!(store.load()?, Some(first));
+    assert!(store.save_interrupted(&second).await.is_err());
+    drop(store);
+
+    let mut restarted_store = FileCheckpointStore::new(checkpoint_path);
+    assert_eq!(restarted_store.load().await?, Some(first));
+    restarted_store.save(&second).await?;
+    assert_eq!(restarted_store.load().await?, Some(second));
     Ok(())
 }
 
@@ -996,5 +1066,52 @@ async fn connection_errors_use_the_same_bounded_retry_classification(
         })
     ));
     assert_eq!(permanent_factory.starts, vec![initial]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_server_error_classification_drives_recovery_policy() -> Result<(), ReplicationError>
+{
+    let initial = CdcOffset::Position {
+        file: "mysql-bin.000013".to_owned(),
+        position: 4,
+    };
+    let unavailable = classify_mysql_server_error(1040, "too many connections");
+    assert_eq!(unavailable.kind, ReplicationErrorKind::ServerUnavailable);
+    assert!(unavailable.retryable);
+    let authentication = classify_mysql_server_error(1045, "access denied");
+    assert_eq!(authentication.kind, ReplicationErrorKind::Authentication);
+    assert!(!authentication.retryable);
+    let purged = classify_mysql_server_error(1236, "binlog unavailable");
+    assert_eq!(purged.kind, ReplicationErrorKind::BinlogPurged);
+    assert!(!purged.retryable);
+
+    let mut factory = ScriptFactory {
+        scripts: VecDeque::from([
+            vec![Err(classify_mysql_server_error(
+                1053,
+                "server shutdown in progress",
+            ))],
+            vec![Ok(None)],
+        ]),
+        starts: Vec::new(),
+    };
+    let mut sink = RecordingSink::default();
+    let mut checkpoints = MemoryCheckpointStore::default();
+    run_recovery_loop(
+        &mut factory,
+        &mut sink,
+        &mut checkpoints,
+        initial.clone(),
+        RecoveryOptions {
+            max_reconnects: 1,
+            reconnect_delay: Duration::ZERO,
+            heartbeat_timeout: Duration::from_secs(1),
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(factory.starts, vec![initial.clone(), initial]);
     Ok(())
 }

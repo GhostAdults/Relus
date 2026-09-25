@@ -6,6 +6,7 @@ pub enum ReplicationErrorKind {
     Authentication,
     Tls,
     Network,
+    ServerUnavailable,
     InvalidOffset,
     BinlogPurged,
     Decode,

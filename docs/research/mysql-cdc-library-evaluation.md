@@ -284,16 +284,19 @@ by the `PrototypeSink` seam. File/position values persist directly; GTID values 
 with the candidate library's `Sid` parser so the completed transaction becomes part of the next
 replication resume set.
 
-File checkpoints use a versioned JSON record, monotonic sequence, fsynced temporary file, and
-atomic rename. The interrupted-checkpoint failpoint stops after the new temporary record is durable
-but before replacement, proving the prior confirmed checkpoint remains readable. The real
+File checkpoints use asynchronous filesystem I/O, a versioned JSON record, monotonic sequence,
+fsynced temporary file, and atomic rename. The interrupted-checkpoint failpoint stops after the new
+temporary record is durable but before replacement; a restarted store reads the prior confirmed
+record and safely replaces the leftover temporary file on the next save. The real
 `MySqlRecoveryClientFactory` injects that confirmed offset into each new
 `MySqlAsyncReplicationClient`.
 
-The recovery loop classifies both connection and read errors through the stable Relus error type.
-Only errors marked retryable reconnect, reconnect count is bounded, and every retry starts from
-the last confirmed checkpoint. A valid replication heartbeat completes a read window; subsequent
-silence triggers the same bounded reconnect path. Permanent errors return immediately.
+The recovery loop classifies connection, read, and representative MySQL server errors through the
+stable Relus error type. Only errors marked retryable reconnect, reconnect count is bounded, delay
+uses exponential growth with jitter, and every retry starts from the last confirmed checkpoint. A
+valid replication heartbeat completes a read window; subsequent silence triggers the same bounded
+reconnect path. Unexpected EOF during an incomplete transaction also reconnects and replays from
+the confirmed checkpoint. Permanent errors return immediately.
 
 The public-boundary recovery tests cover all five requested failpoints: before sink write, after
 sink acknowledgment but before checkpoint, during atomic checkpoint replacement, during a

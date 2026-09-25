@@ -76,15 +76,17 @@ Issue #31 adds a Relus-owned recovery seam around the candidate adapter:
 
 - `TestCheckpointStore` persists a versioned checkpoint containing the last sink-confirmed
   complete transaction offset and a monotonic sequence.
-- `FileCheckpointStore` writes and fsyncs a temporary JSON record before atomically replacing the
-  prior checkpoint. An interrupted save leaves the prior record readable.
+- `FileCheckpointStore` uses asynchronous filesystem I/O to write and fsync a temporary JSON
+  record before atomically replacing the prior checkpoint. An interrupted save leaves the prior
+  record readable, and a restart safely replaces the leftover temporary file on the next save.
 - File/position offsets persist directly. GTID checkpoints normalize the completed transaction
   into the MySQL resume set with `mysql_async`'s own `Sid` parser.
 - `PrototypeSink` separates row writes from transaction acknowledgment. The checkpoint advances
   only after the sink acknowledges the complete COMMIT.
 - `MySqlRecoveryClientFactory` creates each real replication client from the last confirmed
-  checkpoint. Retryable connection/read errors and heartbeat silence reconnect with a configured
-  bound; permanent errors stop immediately.
+  checkpoint. Retryable connection/read errors, temporary MySQL server-unavailable errors,
+  unexpected EOF during a transaction, and heartbeat silence reconnect with a configured bound
+  using exponential delay with jitter; permanent errors stop immediately.
 
 `tests/recovery.rs` exercises crash/restart before sink write, after sink acknowledgment but before
 checkpoint, during the atomic checkpoint operation, during a multi-row transaction, and after a
