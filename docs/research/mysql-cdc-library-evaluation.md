@@ -271,3 +271,52 @@ cargo tree --locked --manifest-path prototypes/mysql-cdc-candidate/Cargo.toml -i
 These results do not upgrade the candidate beyond `conditionally_recommended`: the approved live
 MySQL environments and certificate paths were absent, Linux compilation remains blocked by a
 missing cross C compiler, and the remaining formal target toolchains were unavailable.
+
+## Issue #31 recovery update
+
+Date: 2026-09-26
+
+Issue: [#31](https://github.com/GhostAdults/Relus/issues/31)
+
+The prototype now contains a simplified persistent checkpoint and recovery loop outside the
+production Reader/Engine/Writer path. A checkpoint is the last complete transaction acknowledged
+by the `PrototypeSink` seam. File/position values persist directly; GTID values are normalized
+with the candidate library's `Sid` parser so the completed transaction becomes part of the next
+replication resume set.
+
+File checkpoints use a versioned JSON record, monotonic sequence, fsynced temporary file, and
+atomic rename. The interrupted-checkpoint failpoint stops after the new temporary record is durable
+but before replacement, proving the prior confirmed checkpoint remains readable. The real
+`MySqlRecoveryClientFactory` injects that confirmed offset into each new
+`MySqlAsyncReplicationClient`.
+
+The recovery loop classifies both connection and read errors through the stable Relus error type.
+Only errors marked retryable reconnect, reconnect count is bounded, and every retry starts from
+the last confirmed checkpoint. A valid replication heartbeat completes a read window; subsequent
+silence triggers the same bounded reconnect path. Permanent errors return immediately.
+
+The public-boundary recovery tests cover all five requested failpoints: before sink write, after
+sink acknowledgment but before checkpoint, during atomic checkpoint replacement, during a
+multi-row transaction, and after a snapshot-complete checkpoint but before incremental handoff.
+They prove stable replay IDs, allowed replay of unconfirmed writes, no checkpoint advancement when
+the sink rejects a transaction, and no checkpoint crossing an incomplete transaction.
+
+| Issue #31 evidence item | Result |
+| --- | --- |
+| File/position checkpoint persistence and restart offset | `passed` |
+| GTID checkpoint normalization and restart offset | `passed` |
+| Checkpoint after sink acknowledgment only | `passed` |
+| Stable replay identity for unconfirmed transactions | `passed` |
+| Retryable/permanent connection and read classification | `passed` |
+| Bounded reconnect from last confirmed checkpoint | `passed` |
+| Heartbeat activity and silence detection | `passed` |
+| Exit before sink write | `passed` |
+| Exit after sink acknowledgment before checkpoint | `passed` |
+| Exit during checkpoint replacement | `passed` |
+| Exit during multi-row transaction | `passed` |
+| Exit after snapshot checkpoint before incremental handoff | `passed` |
+| Live MySQL file/position and GTID restart | `not_run` (versioned environment unavailable) |
+
+These are deterministic prototype proofs, not production checkpoint authorization. They do not
+modify the production Reader, Engine, Writer, Redb schema, snapshot implementation, or startup
+mode selection.

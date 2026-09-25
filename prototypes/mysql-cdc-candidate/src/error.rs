@@ -12,6 +12,9 @@ pub enum ReplicationErrorKind {
     UnsupportedEvent,
     Protocol,
     Shutdown,
+    Checkpoint,
+    HeartbeatTimeout,
+    Failpoint,
 }
 
 #[derive(Debug, Error)]

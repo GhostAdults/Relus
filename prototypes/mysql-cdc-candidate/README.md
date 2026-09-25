@@ -1,6 +1,6 @@
 # Relus MySQL CDC candidate prototype
 
-Independent prototype for GitHub issues #29 and #30. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
+Independent prototype for GitHub issues #29 through #31. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
 
 Selected dependency:
 
@@ -70,6 +70,27 @@ The cancellation check races a pending replication read against a cancellation t
 read future, and closes the owned replication connection within a bounded timeout. It starts no
 blocking worker thread.
 
+## Recovery and at-least-once crash proof
+
+Issue #31 adds a Relus-owned recovery seam around the candidate adapter:
+
+- `TestCheckpointStore` persists a versioned checkpoint containing the last sink-confirmed
+  complete transaction offset and a monotonic sequence.
+- `FileCheckpointStore` writes and fsyncs a temporary JSON record before atomically replacing the
+  prior checkpoint. An interrupted save leaves the prior record readable.
+- File/position offsets persist directly. GTID checkpoints normalize the completed transaction
+  into the MySQL resume set with `mysql_async`'s own `Sid` parser.
+- `PrototypeSink` separates row writes from transaction acknowledgment. The checkpoint advances
+  only after the sink acknowledges the complete COMMIT.
+- `MySqlRecoveryClientFactory` creates each real replication client from the last confirmed
+  checkpoint. Retryable connection/read errors and heartbeat silence reconnect with a configured
+  bound; permanent errors stop immediately.
+
+`tests/recovery.rs` exercises crash/restart before sink write, after sink acknowledgment but before
+checkpoint, during the atomic checkpoint operation, during a multi-row transaction, and after a
+snapshot-complete checkpoint but before incremental handoff. It proves unconfirmed work may replay
+with stable event IDs, while a checkpoint never crosses a rejected or incomplete transaction.
+
 The documented harmless allowlist is intentionally narrow: format-description,
 previous-GTID-set, rows-query metadata, and events explicitly marked ignorable by MySQL.
 TABLE_MAP and ROTATE are emitted as versioned Relus control messages. Transaction-payload
@@ -77,4 +98,4 @@ markers fail closed because upstream decompression failures are not surfaced rel
 
 ## Optional MySQL 8.0 run
 
-The streaming binary only connects when all required `RELUS_TEST_MYSQL80_*` variables are supplied, including `BINLOG_FILE`, `BINLOG_POSITION`, and `SERVER_ID`. It prints versioned JSON messages. The #29 slice implements file/position and GTID-set streaming; #30 adds TLS configuration, authentication verification, and controlled cancellation. Recovery, snapshot, and timestamp modes belong to later tickets.
+The streaming binary only connects when all required `RELUS_TEST_MYSQL80_*` variables are supplied, including `BINLOG_FILE`, `BINLOG_POSITION`, and `SERVER_ID`. It prints versioned JSON messages. The #29 slice implements file/position and GTID-set streaming; #30 adds TLS configuration, authentication verification, and controlled cancellation; #31 adds the independent recovery loop and crash proofs. Full snapshot execution and timestamp positioning belong to later tickets.
