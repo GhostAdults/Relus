@@ -274,7 +274,7 @@ missing cross C compiler, and the remaining formal target toolchains were unavai
 
 ## Issue #31 recovery update
 
-Date: 2026-09-26
+Date: 2026-09-25
 
 Issue: [#31](https://github.com/GhostAdults/Relus/issues/31)
 
