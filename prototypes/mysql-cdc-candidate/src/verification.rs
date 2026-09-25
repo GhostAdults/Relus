@@ -4,12 +4,22 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    adapter::{consume_until_cancelled, verify_connection},
+    adapter::{consume_until_cancelled, verify_authentication_plugin, verify_connection},
     CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig, MySqlReplicationClient,
     ReplicationErrorKind, TlsMode,
 };
 
 const MYSQL_VERSIONS: [&str; 4] = ["56", "57", "80", "84"];
+const PROFILE_CASE_SUFFIXES: [&str; 8] = [
+    "tls_disabled",
+    "tls_required",
+    "tls_wrong_server_identity",
+    "tls_wrong_ca",
+    "mutual_tls",
+    "auth.mysql_native_password",
+    "auth.caching_sha2_password",
+    "cancellation",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -204,16 +214,13 @@ async fn verify_profile(
             "custom CA and server identity were verified",
         ));
 
-        let wrong_name = match required_tls {
-            TlsMode::Required {
-                ca_path,
-                server_name,
-            } => TlsMode::Required {
-                ca_path,
-                server_name: format!("invalid.{server_name}"),
-            },
-            TlsMode::Disabled | TlsMode::Mutual { .. } => unreachable!(),
-        };
+        let server_name = certificates
+            .server_name
+            .as_deref()
+            .unwrap_or("mysql.invalid");
+        let wrong_name = required_tls
+            .with_server_name(format!("invalid.{server_name}"))
+            .unwrap_or(TlsMode::Disabled);
         cases.push(expected_tls_failure_case(
             format!("mysql{}.tls_wrong_server_identity", profile.version),
             verify_connection(&profile.default_config(wrong_name)).await,
@@ -267,16 +274,18 @@ async fn verify_profile(
             environment.get(&format!("{prefix}_USERNAME")),
             environment.get(&format!("{prefix}_PASSWORD")),
         ) {
-            (Some(username), Some(password)) => cases.push(connection_case(
-                format!("mysql{}.auth.{label}", profile.version),
-                verify_connection(&profile.connection_config(
+            (Some(username), Some(password)) => {
+                let config = profile.connection_config(
                     username.clone(),
                     password.clone(),
                     certificates.strongest_tls(),
-                ))
-                .await,
-                "the supplied authentication profile connected successfully",
-            )),
+                );
+                cases.push(connection_case(
+                    format!("mysql{}.auth.{label}", profile.version),
+                    verify_authentication_plugin(&config, label).await,
+                    "the supplied account connected and its server definition confirmed the expected authentication plugin",
+                ));
+            }
             (None, None) => cases.push(not_run(
                 format!("mysql{}.auth.{label}", profile.version),
                 "the authentication-specific account was not supplied",
@@ -390,35 +399,26 @@ fn expected_tls_failure_case(
 }
 
 fn append_unavailable_profile(version: &str, cases: &mut Vec<VerificationCase>) {
-    for suffix in [
-        "tls_disabled",
-        "tls_required",
-        "tls_wrong_server_identity",
-        "tls_wrong_ca",
-        "mutual_tls",
-        "auth.mysql_native_password",
-        "auth.caching_sha2_password",
-        "cancellation",
-    ] {
-        cases.push(not_run(
-            format!("mysql{version}.{suffix}"),
-            "the versioned MySQL environment is unavailable",
-        ));
-    }
+    append_profile_cases(
+        version,
+        cases,
+        VerificationStatus::NotRun,
+        "the versioned MySQL environment is unavailable",
+    );
 }
 
 fn append_failed_profile(version: &str, detail: String, cases: &mut Vec<VerificationCase>) {
-    for suffix in [
-        "tls_disabled",
-        "tls_required",
-        "tls_wrong_server_identity",
-        "tls_wrong_ca",
-        "mutual_tls",
-        "auth.mysql_native_password",
-        "auth.caching_sha2_password",
-        "cancellation",
-    ] {
-        cases.push(failed(format!("mysql{version}.{suffix}"), &detail));
+    append_profile_cases(version, cases, VerificationStatus::Failed, &detail);
+}
+
+fn append_profile_cases(
+    version: &str,
+    cases: &mut Vec<VerificationCase>,
+    status: VerificationStatus,
+    detail: &str,
+) {
+    for suffix in PROFILE_CASE_SUFFIXES {
+        cases.push(case(format!("mysql{version}.{suffix}"), status, detail));
     }
 }
 

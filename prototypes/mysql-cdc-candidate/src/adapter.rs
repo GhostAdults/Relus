@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use mysql_async::{
     binlog::events::{Event, EventData, RowsEventData},
     consts::ColumnFlags,
+    prelude::Queryable,
     BinlogStream, BinlogStreamRequest, ClientIdentity, Conn, OptsBuilder, Row, SslOpts, Value,
 };
 use tokio_util::sync::CancellationToken;
@@ -50,6 +51,60 @@ impl std::fmt::Debug for TlsMode {
     }
 }
 
+impl TlsMode {
+    fn ssl_opts(&self) -> Result<Option<SslOpts>, ReplicationError> {
+        match self {
+            Self::Disabled => Ok(None),
+            Self::Required {
+                ca_path,
+                server_name,
+            } => {
+                validate_tls_paths(ca_path, server_name, None, None)?;
+                Ok(Some(verified_ssl_opts(ca_path, server_name, None)))
+            }
+            Self::Mutual {
+                ca_path,
+                server_name,
+                client_cert_path,
+                client_key_path,
+            } => {
+                validate_tls_paths(
+                    ca_path,
+                    server_name,
+                    Some(client_cert_path),
+                    Some(client_key_path),
+                )?;
+                Ok(Some(verified_ssl_opts(
+                    ca_path,
+                    server_name,
+                    Some((client_cert_path, client_key_path)),
+                )))
+            }
+        }
+    }
+
+    pub fn with_server_name(&self, replacement: String) -> Option<Self> {
+        match self {
+            Self::Disabled => None,
+            Self::Required { ca_path, .. } => Some(Self::Required {
+                ca_path: ca_path.clone(),
+                server_name: replacement,
+            }),
+            Self::Mutual {
+                ca_path,
+                client_cert_path,
+                client_key_path,
+                ..
+            } => Some(Self::Mutual {
+                ca_path: ca_path.clone(),
+                server_name: replacement,
+                client_cert_path: client_cert_path.clone(),
+                client_key_path: client_key_path.clone(),
+            }),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MySqlConnectionConfig {
     pub host: String,
@@ -64,51 +119,18 @@ pub struct MySqlConnectionConfig {
 
 impl MySqlConnectionConfig {
     pub fn validate(&self) -> Result<(), ReplicationError> {
-        match &self.tls {
-            TlsMode::Disabled => Ok(()),
-            TlsMode::Required {
-                ca_path,
-                server_name,
-            } => validate_tls_paths(ca_path, server_name, None, None),
-            TlsMode::Mutual {
-                ca_path,
-                server_name,
-                client_cert_path,
-                client_key_path,
-            } => validate_tls_paths(
-                ca_path,
-                server_name,
-                Some(client_cert_path),
-                Some(client_key_path),
-            ),
-        }
+        self.tls.ssl_opts().map(|_| ())
     }
 
     pub(crate) fn mysql_opts(&self) -> Result<mysql_async::Opts, ReplicationError> {
-        self.validate()?;
+        let ssl_opts = self.tls.ssl_opts()?;
         let mut opts = OptsBuilder::default()
             .ip_or_hostname(self.host.clone())
             .tcp_port(self.port)
             .user(Some(self.username.clone()))
             .pass(Some(self.password.clone()))
             .db_name(Some(self.database.clone()));
-        opts = match &self.tls {
-            TlsMode::Disabled => opts,
-            TlsMode::Required {
-                ca_path,
-                server_name,
-            } => opts.ssl_opts(Some(verified_ssl_opts(ca_path, server_name, None))),
-            TlsMode::Mutual {
-                ca_path,
-                server_name,
-                client_cert_path,
-                client_key_path,
-            } => opts.ssl_opts(Some(verified_ssl_opts(
-                ca_path,
-                server_name,
-                Some((client_cert_path, client_key_path)),
-            ))),
-        };
+        opts = opts.ssl_opts(ssl_opts);
         Ok(opts.into())
     }
 }
@@ -217,6 +239,37 @@ pub(crate) async fn verify_connection(
         .await
         .map_err(map_mysql_error)?;
     connection.disconnect().await.map_err(map_mysql_error)
+}
+
+pub(crate) async fn verify_authentication_plugin(
+    config: &MySqlConnectionConfig,
+    expected_plugin: &'static str,
+) -> Result<(), ReplicationError> {
+    let mut connection = Conn::new(config.mysql_opts()?)
+        .await
+        .map_err(map_mysql_error)?;
+    let create_user = connection
+        .query_first::<(String, String), _>("SHOW CREATE USER CURRENT_USER()")
+        .await
+        .map_err(map_mysql_error)?
+        .ok_or_else(|| {
+            ReplicationError::new(
+                ReplicationErrorKind::Authentication,
+                false,
+                "the server did not return the current account authentication definition",
+            )
+        })?
+        .1;
+    let uses_expected_plugin = create_user.contains(expected_plugin);
+    connection.disconnect().await.map_err(map_mysql_error)?;
+    if !uses_expected_plugin {
+        return Err(ReplicationError::new(
+            ReplicationErrorKind::Authentication,
+            false,
+            "the supplied account does not use the expected authentication plugin",
+        ));
+    }
+    Ok(())
 }
 
 pub struct MySqlAsyncReplicationClient {

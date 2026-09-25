@@ -225,7 +225,11 @@ The new `verify` binary reports each available MySQL/version capability as `pass
 `not_run`. Negative TLS cases only pass when the connection returns the stable Relus `Tls` error
 classification, so a network or authentication failure cannot masquerade as proof that an invalid
 CA or server identity was rejected. Authentication-specific accounts are optional and missing
-profiles are reported as `not_run`.
+profiles are reported as `not_run`. A successful authentication case also runs
+`SHOW CREATE USER CURRENT_USER()` and verifies that the server-side account definition names the
+expected plugin; the returned definition is not printed or included in errors. The wrong-CA case
+uses the separately supplied client-certificate path as an intentionally incorrect trust root,
+and remains `not_run` when no second approved certificate path is available.
 
 Cancellation is implemented without a blocking worker: the consumer races the pending binlog
 read against a cancellation token, drops the read future, and then closes the stream-owned

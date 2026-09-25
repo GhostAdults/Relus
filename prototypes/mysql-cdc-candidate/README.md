@@ -60,6 +60,12 @@ RELUS_TEST_MYSQL80_SERVER_ID
 ```
 
 Authentication and replication variables use the same suffixes for the other version profiles.
+Authentication checks run `SHOW CREATE USER CURRENT_USER()` after connecting and confirm the
+account's server-side definition names the expected plugin; the returned definition is never
+printed or included in errors. This avoids treating a mislabeled account as plugin evidence.
+The wrong-CA case requires a second approved certificate path; the harness uses the supplied
+client-certificate path as that distinct trust root and reports `not_run` when no such approved
+path exists.
 The cancellation check races a pending replication read against a cancellation token, drops the
 read future, and closes the owned replication connection within a bounded timeout. It starts no
 blocking worker thread.
