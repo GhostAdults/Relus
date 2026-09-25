@@ -171,43 +171,52 @@ where
             let event =
                 match tokio::time::timeout(options.heartbeat_timeout, client.next_event()).await {
                     Ok(Ok(Some(event))) => event,
-                    Ok(Ok(None)) if assembler.has_active_transaction() => {
-                        if reconnects >= options.max_reconnects {
-                            return Err(ReplicationError::new(
-                                ReplicationErrorKind::Network,
-                                false,
-                                "replication stream ended during an incomplete transaction",
-                            ));
-                        }
-                        reconnects += 1;
-                        let _ = client.close().await;
-                        wait_before_reconnect(options.reconnect_delay, reconnects).await;
-                        break;
-                    }
-                    Ok(Ok(None)) => {
+                    Ok(Ok(None))
+                        if client.is_finite_stream() && !assembler.has_active_transaction() =>
+                    {
                         client.close().await?;
                         return Ok(());
                     }
+                    Ok(Ok(None)) => {
+                        let message = if assembler.has_active_transaction() {
+                            "replication stream ended during an incomplete transaction"
+                        } else {
+                            "replication stream ended unexpectedly"
+                        };
+                        reconnect_connected_client(
+                            client.as_mut(),
+                            &mut reconnects,
+                            options,
+                            ReplicationError::new(ReplicationErrorKind::Network, false, message),
+                        )
+                        .await?;
+                        break;
+                    }
                     Ok(Err(error)) => {
                         if should_reconnect(&error, reconnects, options.max_reconnects) {
-                            reconnects += 1;
-                            let _ = client.close().await;
-                            wait_before_reconnect(options.reconnect_delay, reconnects).await;
+                            reconnect_connected_client(
+                                client.as_mut(),
+                                &mut reconnects,
+                                options,
+                                error,
+                            )
+                            .await?;
                             break;
                         }
                         return Err(error);
                     }
                     Err(_) => {
-                        if reconnects >= options.max_reconnects {
-                            return Err(ReplicationError::new(
+                        reconnect_connected_client(
+                            client.as_mut(),
+                            &mut reconnects,
+                            options,
+                            ReplicationError::new(
                                 ReplicationErrorKind::HeartbeatTimeout,
                                 false,
                                 "replication heartbeat timeout exceeded reconnect limit",
-                            ));
-                        }
-                        reconnects += 1;
-                        let _ = client.close().await;
-                        wait_before_reconnect(options.reconnect_delay, reconnects).await;
+                            ),
+                        )
+                        .await?;
                         break;
                     }
                 };
@@ -277,6 +286,21 @@ async fn wait_before_reconnect(base_delay: Duration, reconnect_number: u32) {
             .subsec_nanos()
             % 41;
     tokio::time::sleep(exponential.saturating_mul(jitter_percent) / 100).await;
+}
+
+async fn reconnect_connected_client(
+    client: &mut dyn MySqlReplicationClient,
+    reconnects: &mut u32,
+    options: RecoveryOptions,
+    exhausted_error: ReplicationError,
+) -> Result<(), ReplicationError> {
+    if *reconnects >= options.max_reconnects {
+        return Err(exhausted_error);
+    }
+    *reconnects += 1;
+    let _ = client.close().await;
+    wait_before_reconnect(options.reconnect_delay, *reconnects).await;
+    Ok(())
 }
 
 impl FileCheckpointStore {

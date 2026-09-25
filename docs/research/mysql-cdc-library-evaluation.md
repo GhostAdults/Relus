@@ -295,8 +295,8 @@ The recovery loop classifies connection, read, and representative MySQL server e
 stable Relus error type. Only errors marked retryable reconnect, reconnect count is bounded, delay
 uses exponential growth with jitter, and every retry starts from the last confirmed checkpoint. A
 valid replication heartbeat completes a read window; subsequent silence triggers the same bounded
-reconnect path. Unexpected EOF during an incomplete transaction also reconnects and replays from
-the confirmed checkpoint. Permanent errors return immediately.
+reconnect path. Unexpected EOF both during and between transactions reconnects from the confirmed
+checkpoint; incomplete work replays. Permanent errors return immediately.
 
 The public-boundary recovery tests cover all five requested failpoints: before sink write, after
 sink acknowledgment but before checkpoint, during atomic checkpoint replacement, during a

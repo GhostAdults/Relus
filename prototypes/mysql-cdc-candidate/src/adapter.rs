@@ -203,6 +203,10 @@ pub trait MySqlReplicationClient: Send {
     async fn connect(&mut self) -> Result<(), ReplicationError>;
     async fn next_event(&mut self) -> Result<Option<RawReplicationEvent>, ReplicationError>;
     async fn close(&mut self) -> Result<(), ReplicationError>;
+
+    fn is_finite_stream(&self) -> bool {
+        false
+    }
 }
 
 pub async fn consume_until_cancelled<C: MySqlReplicationClient + ?Sized>(

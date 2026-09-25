@@ -85,8 +85,8 @@ Issue #31 adds a Relus-owned recovery seam around the candidate adapter:
   only after the sink acknowledges the complete COMMIT.
 - `MySqlRecoveryClientFactory` creates each real replication client from the last confirmed
   checkpoint. Retryable connection/read errors, temporary MySQL server-unavailable errors,
-  unexpected EOF during a transaction, and heartbeat silence reconnect with a configured bound
-  using exponential delay with jitter; permanent errors stop immediately.
+  unexpected replication EOF (including between transactions), and heartbeat silence reconnect
+  with a configured bound using exponential delay with jitter; permanent errors stop immediately.
 
 `tests/recovery.rs` exercises crash/restart before sink write, after sink acknowledgment but before
 checkpoint, during the atomic checkpoint operation, during a multi-row transaction, and after a

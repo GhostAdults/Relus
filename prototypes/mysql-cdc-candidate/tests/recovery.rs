@@ -77,6 +77,7 @@ impl TestCheckpointStore for MemoryCheckpointStore {
 
 struct ScriptClient {
     events: VecDeque<Result<Option<RawReplicationEvent>, ReplicationError>>,
+    finite: bool,
 }
 
 struct DelayedClient {
@@ -117,6 +118,10 @@ impl MySqlReplicationClient for ScriptClient {
     async fn close(&mut self) -> Result<(), ReplicationError> {
         Ok(())
     }
+
+    fn is_finite_stream(&self) -> bool {
+        self.finite
+    }
 }
 
 struct ScriptFactory {
@@ -128,6 +133,34 @@ struct HeartbeatFactory {
     starts: Vec<CdcOffset>,
     calls: u32,
     heartbeat: RawReplicationEvent,
+}
+
+struct EofRecoveryFactory {
+    starts: Vec<CdcOffset>,
+    scripts: VecDeque<EofScript>,
+}
+
+struct EofScript {
+    events: Vec<Result<Option<RawReplicationEvent>, ReplicationError>>,
+    finite: bool,
+}
+
+#[async_trait]
+impl RecoveryClientFactory for EofRecoveryFactory {
+    async fn connect(
+        &mut self,
+        start_offset: CdcOffset,
+    ) -> Result<Box<dyn MySqlReplicationClient>, ReplicationError> {
+        self.starts.push(start_offset);
+        let script = self.scripts.pop_front().unwrap_or(EofScript {
+            events: Vec::new(),
+            finite: true,
+        });
+        Ok(Box::new(ScriptClient {
+            events: script.events.into(),
+            finite: script.finite,
+        }))
+    }
 }
 
 #[async_trait]
@@ -146,6 +179,7 @@ impl RecoveryClientFactory for HeartbeatFactory {
         } else {
             Ok(Box::new(ScriptClient {
                 events: VecDeque::from([Ok(None)]),
+                finite: true,
             }))
         }
     }
@@ -159,7 +193,10 @@ impl RecoveryClientFactory for ScriptFactory {
     ) -> Result<Box<dyn MySqlReplicationClient>, ReplicationError> {
         self.starts.push(start_offset);
         let events = self.scripts.pop_front().unwrap_or_default().into();
-        Ok(Box::new(ScriptClient { events }))
+        Ok(Box::new(ScriptClient {
+            events,
+            finite: true,
+        }))
     }
 }
 
@@ -205,6 +242,7 @@ impl RecoveryClientFactory for ConnectFailureFactory {
         match self.results.pop_front().unwrap_or(Ok(())) {
             Ok(()) => Ok(Box::new(ScriptClient {
                 events: VecDeque::from([Ok(None)]),
+                finite: true,
             })),
             Err(error) => Err(error),
         }
@@ -477,6 +515,60 @@ async fn eof_during_transaction_reconnects_and_replays_from_confirmed_checkpoint
     assert_eq!(factory.starts, vec![initial.clone(), initial]);
     assert_eq!(sink.event_ids.len(), 2);
     assert_eq!(sink.event_ids[0], sink.event_ids[1]);
+    assert_eq!(sink.acknowledged, vec![commit_offset.clone()]);
+    assert_eq!(
+        checkpoints
+            .load()
+            .await?
+            .map(|checkpoint| checkpoint.confirmed_offset),
+        Some(commit_offset)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn eof_between_transactions_reconnects_from_the_confirmed_checkpoint(
+) -> Result<(), ReplicationError> {
+    let initial = CdcOffset::Position {
+        file: "mysql-bin.000001".to_owned(),
+        position: 4,
+    };
+    let commit_offset = initial.with_position("mysql-bin.000001", 440);
+    let mut factory = EofRecoveryFactory {
+        starts: Vec::new(),
+        scripts: VecDeque::from([
+            EofScript {
+                events: transaction(
+                    initial.with_position("mysql-bin.000001", 400),
+                    commit_offset.clone(),
+                    4,
+                ),
+                finite: false,
+            },
+            EofScript {
+                events: vec![Ok(None)],
+                finite: true,
+            },
+        ]),
+    };
+    let mut sink = RecordingSink::default();
+    let mut checkpoints = MemoryCheckpointStore::default();
+
+    run_recovery_loop(
+        &mut factory,
+        &mut sink,
+        &mut checkpoints,
+        initial.clone(),
+        RecoveryOptions {
+            max_reconnects: 1,
+            reconnect_delay: Duration::ZERO,
+            heartbeat_timeout: Duration::from_secs(1),
+        },
+        None,
+    )
+    .await?;
+
+    assert_eq!(factory.starts, vec![initial, commit_offset.clone()]);
     assert_eq!(sink.acknowledged, vec![commit_offset.clone()]);
     assert_eq!(
         checkpoints
