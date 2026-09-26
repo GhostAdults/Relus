@@ -191,6 +191,9 @@ impl TransactionAssembler {
 
 fn validate_full_row_image(change: &RowChange) -> Result<(), ReplicationError> {
     let valid = match change.operation {
+        crate::envelope::CdcOperation::Snapshot => {
+            change.before.is_none() && change.after.is_some()
+        }
         crate::envelope::CdcOperation::Insert => change.before.is_none() && change.after.is_some(),
         crate::envelope::CdcOperation::Update => change.before.is_some() && change.after.is_some(),
         crate::envelope::CdcOperation::Delete => change.before.is_some() && change.after.is_none(),

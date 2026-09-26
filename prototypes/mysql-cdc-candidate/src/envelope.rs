@@ -106,6 +106,7 @@ pub type CdcRow = BTreeMap<String, CdcValue>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CdcOperation {
+    Snapshot,
     Insert,
     Update,
     Delete,

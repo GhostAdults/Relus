@@ -323,3 +323,35 @@ the sink rejects a transaction, and no checkpoint crossing an incomplete transac
 These are deterministic prototype proofs, not production checkpoint authorization. They do not
 modify the production Reader, Engine, Writer, Redb schema, snapshot implementation, or startup
 mode selection.
+
+## Issue #32 startup-mode update
+
+Date: 2026-09-26
+
+Issue: [#32](https://github.com/GhostAdults/Relus/issues/32)
+
+The prototype now exposes a startup resolver with explicit `initial`, `earliest`, `latest`,
+`specific`, and offset-aware `timestamp` modes. Specific file/position and GTID offsets are
+validated against retained history. Earliest and latest are supplied by the source boundary seam;
+timestamp scanning chooses the first complete transaction whose commit covers the requested UTC
+instant and persists the resulting offset for restart. Invalid RFC 3339 values, timestamps before
+retained history, and missing transaction boundaries fail explicitly.
+
+The initial path uses a single consistent snapshot cursor. It requires an InnoDB table, a stable
+non-null unique key, and an idempotent snapshot sink. Snapshot rows carry `operation="snapshot"`
+and deterministic key-based event IDs. The sink is acknowledged before a snapshot-complete
+checkpoint records the captured Binlog offset. Any row or sink failure leaves the checkpoint absent,
+so the next run starts a new consistent snapshot from the beginning.
+
+| Issue #32 evidence item | Result |
+| --- | --- |
+| Specific file/position startup | `passed` |
+| Specific GTID startup | `passed` |
+| Earliest retained Binlog startup | `passed` |
+| Latest startup boundary | `passed` |
+| Initial InnoDB snapshot ordering and handoff offset | `passed` |
+| Failed initial snapshot restarts from the beginning | `passed` |
+| Offset-aware RFC 3339 timestamp boundary | `passed` |
+| Missing or purged history fails without fallback | `passed` |
+| Non-InnoDB and unstable-key rejection | `passed` |
+| Live MySQL startup-mode and snapshot runs | `not_run` (versioned environment unavailable) |
