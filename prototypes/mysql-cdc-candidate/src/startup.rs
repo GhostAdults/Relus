@@ -59,6 +59,11 @@ pub trait InitialSnapshotSource: Send {
         &mut self,
         table: &str,
     ) -> Result<Box<dyn SnapshotCursor>, ReplicationError>;
+
+    async fn next_incremental(
+        &mut self,
+        start_offset: &CdcOffset,
+    ) -> Result<Option<CdcEnvelope>, ReplicationError>;
 }
 
 #[async_trait]
@@ -67,6 +72,8 @@ pub trait SnapshotCursor: Send {
     fn table(&self) -> &str;
     fn engine(&self) -> &str;
     fn unique_key_columns(&self) -> &[String];
+    fn unique_key_is_stable(&self) -> bool;
+    fn uses_stable_key_pagination(&self) -> bool;
     fn captured_offset(&self) -> &CdcOffset;
     async fn next_row(&mut self) -> Result<Option<SnapshotRow>, ReplicationError>;
 }
@@ -75,6 +82,7 @@ pub trait SnapshotCursor: Send {
 pub trait SnapshotSink: Send {
     fn supports_idempotent_snapshot(&self) -> bool;
     async fn write_snapshot(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError>;
+    async fn write_incremental(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError>;
     async fn acknowledge_snapshot(
         &mut self,
         completion: &SnapshotCompletion,
@@ -132,12 +140,15 @@ async fn resolve_timestamp<P: StartupOffsetProvider>(
         )
     })?;
     let requested_seconds = requested.timestamp();
-    let mut boundaries = source.transaction_boundaries().await?;
-    boundaries.sort_by_key(|boundary| boundary.started_at_utc_seconds);
-    let Some(first) = boundaries.first() else {
+    let boundaries = source.transaction_boundaries().await?;
+    let Some(earliest_start) = boundaries
+        .iter()
+        .map(|boundary| boundary.started_at_utc_seconds)
+        .min()
+    else {
         return Err(invalid_offset("no retained transactions are available"));
     };
-    if requested_seconds < first.started_at_utc_seconds {
+    if requested_seconds < earliest_start {
         return Err(ReplicationError::new(
             ReplicationErrorKind::BinlogPurged,
             false,
@@ -146,7 +157,8 @@ async fn resolve_timestamp<P: StartupOffsetProvider>(
     }
     boundaries
         .into_iter()
-        .find(|boundary| boundary.committed_at_utc_seconds >= requested_seconds)
+        .filter(|boundary| boundary.committed_at_utc_seconds >= requested_seconds)
+        .min_by_key(|boundary| boundary.committed_at_utc_seconds)
         .map(|boundary| boundary.start_offset)
         .ok_or_else(|| invalid_offset("no transaction boundary exists at or after the timestamp"))
 }
@@ -176,6 +188,16 @@ where
     if cursor.unique_key_columns().is_empty() {
         return Err(configuration_error(
             "initial snapshot requires a stable unique key",
+        ));
+    }
+    if !cursor.unique_key_is_stable() {
+        return Err(configuration_error(
+            "initial snapshot requires a primary key or non-null unique index",
+        ));
+    }
+    if !cursor.uses_stable_key_pagination() {
+        return Err(configuration_error(
+            "initial snapshot must paginate by the stable unique key",
         ));
     }
 
@@ -225,6 +247,9 @@ where
             CheckpointPhase::SnapshotComplete,
         )?)
         .await?;
+    while let Some(envelope) = source.next_incremental(&captured_offset).await? {
+        sink.write_incremental(&envelope).await?;
+    }
     Ok(captured_offset)
 }
 

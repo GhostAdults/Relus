@@ -337,11 +337,12 @@ timestamp scanning chooses the first complete transaction whose commit covers th
 instant and persists the resulting offset for restart. Invalid RFC 3339 values, timestamps before
 retained history, and missing transaction boundaries fail explicitly.
 
-The initial path uses a single consistent snapshot cursor. It requires an InnoDB table, a stable
-non-null unique key, and an idempotent snapshot sink. Snapshot rows carry `operation="snapshot"`
-and deterministic key-based event IDs. The sink is acknowledged before a snapshot-complete
-checkpoint records the captured Binlog offset. Any row or sink failure leaves the checkpoint absent,
-so the next run starts a new consistent snapshot from the beginning.
+The initial path uses a single consistent snapshot cursor. It requires an InnoDB table, a primary or
+non-null unique key with key-ordered pagination, and an idempotent snapshot sink. Snapshot rows carry
+`operation="snapshot"` and deterministic key-based event IDs. The sink is acknowledged before a
+snapshot-complete checkpoint records the captured Binlog offset, after which the incremental seam
+consumes events from that exact offset. Any row or sink failure leaves the checkpoint absent, so the
+next run starts a new consistent snapshot from the beginning.
 
 | Issue #32 evidence item | Result |
 | --- | --- |
@@ -350,6 +351,7 @@ so the next run starts a new consistent snapshot from the beginning.
 | Earliest retained Binlog startup | `passed` |
 | Latest startup boundary | `passed` |
 | Initial InnoDB snapshot ordering and handoff offset | `passed` |
+| Incremental events follow snapshot acknowledgment from captured offset | `passed` |
 | Failed initial snapshot restarts from the beginning | `passed` |
 | Offset-aware RFC 3339 timestamp boundary | `passed` |
 | Missing or purged history fails without fallback | `passed` |

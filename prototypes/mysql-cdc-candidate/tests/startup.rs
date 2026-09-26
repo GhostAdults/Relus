@@ -35,6 +35,8 @@ struct TestStartupSource {
     boundaries: Vec<BinlogTransactionBoundary>,
     snapshots: VecDeque<Result<TestSnapshotCursor, ReplicationError>>,
     snapshot_starts: usize,
+    incremental: VecDeque<CdcEnvelope>,
+    incremental_starts: Vec<CdcOffset>,
 }
 
 #[async_trait]
@@ -86,6 +88,14 @@ impl InitialSnapshotSource for TestStartupSource {
             )),
         }
     }
+
+    async fn next_incremental(
+        &mut self,
+        start_offset: &CdcOffset,
+    ) -> Result<Option<CdcEnvelope>, ReplicationError> {
+        self.incremental_starts.push(start_offset.clone());
+        Ok(self.incremental.pop_front())
+    }
 }
 
 struct TestSnapshotCursor {
@@ -93,6 +103,7 @@ struct TestSnapshotCursor {
     table: String,
     engine: String,
     unique_key_columns: Vec<String>,
+    stable_unique_key: bool,
     captured_offset: CdcOffset,
     rows: VecDeque<Result<Option<SnapshotRow>, ReplicationError>>,
 }
@@ -115,6 +126,14 @@ impl SnapshotCursor for TestSnapshotCursor {
         &self.unique_key_columns
     }
 
+    fn unique_key_is_stable(&self) -> bool {
+        self.stable_unique_key
+    }
+
+    fn uses_stable_key_pagination(&self) -> bool {
+        self.stable_unique_key
+    }
+
     fn captured_offset(&self) -> &CdcOffset {
         &self.captured_offset
     }
@@ -127,7 +146,9 @@ impl SnapshotCursor for TestSnapshotCursor {
 struct RecordingSnapshotSink {
     event_ids: Vec<String>,
     operations: Vec<String>,
+    sequence: Vec<String>,
     completions: Vec<SnapshotCompletion>,
+    incremental_event_ids: Vec<String>,
     fail_after_writes: Option<usize>,
     idempotent: bool,
 }
@@ -137,7 +158,9 @@ impl Default for RecordingSnapshotSink {
         Self {
             event_ids: Vec::new(),
             operations: Vec::new(),
+            sequence: Vec::new(),
             completions: Vec::new(),
+            incremental_event_ids: Vec::new(),
             fail_after_writes: None,
             idempotent: true,
         }
@@ -151,6 +174,7 @@ impl SnapshotSink for RecordingSnapshotSink {
     }
     async fn write_snapshot(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError> {
         self.event_ids.push(envelope.event_id.clone());
+        self.sequence.push("snapshot".to_owned());
         self.operations
             .push(format!("{:?}", envelope.change.operation));
         if self
@@ -171,6 +195,13 @@ impl SnapshotSink for RecordingSnapshotSink {
         completion: &SnapshotCompletion,
     ) -> Result<(), ReplicationError> {
         self.completions.push(completion.clone());
+        self.sequence.push("ack".to_owned());
+        Ok(())
+    }
+
+    async fn write_incremental(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError> {
+        self.incremental_event_ids.push(envelope.event_id.clone());
+        self.sequence.push("incremental".to_owned());
         Ok(())
     }
 }
@@ -201,6 +232,26 @@ fn snapshot_row(id: u64) -> SnapshotRow {
     }
 }
 
+fn incremental_envelope(offset: CdcOffset) -> CdcEnvelope {
+    CdcEnvelope {
+        schema_version: 1,
+        event_id: "incremental:event-1".to_owned(),
+        transaction_id: "tx-1".to_owned(),
+        transaction_event_index: 0,
+        row_index: 0,
+        event_timestamp_seconds: 1,
+        offset,
+        change: relus_mysql_cdc_candidate::RowChange {
+            database: "sales".to_owned(),
+            table: "orders".to_owned(),
+            operation: relus_mysql_cdc_candidate::CdcOperation::Insert,
+            key: BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(3))]),
+            before: None,
+            after: Some(BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(3))])),
+        },
+    }
+}
+
 fn snapshot_cursor(
     captured_offset: CdcOffset,
     rows: impl IntoIterator<Item = Result<Option<SnapshotRow>, ReplicationError>>,
@@ -210,6 +261,7 @@ fn snapshot_cursor(
         table: "orders".to_owned(),
         engine: "InnoDB".to_owned(),
         unique_key_columns: vec!["id".to_owned()],
+        stable_unique_key: true,
         captured_offset,
         rows: rows.into_iter().collect(),
     }
@@ -223,6 +275,8 @@ fn source() -> TestStartupSource {
         boundaries: Vec::new(),
         snapshots: VecDeque::new(),
         snapshot_starts: 0,
+        incremental: VecDeque::new(),
+        incremental_starts: Vec::new(),
     }
 }
 
@@ -419,6 +473,9 @@ async fn initial_snapshot_is_acknowledged_before_handoff_to_the_captured_offset(
             Ok(None),
         ],
     )));
+    source
+        .incremental
+        .push_back(incremental_envelope(captured.clone()));
     let mut sink = RecordingSnapshotSink::default();
     let mut checkpoints = MemoryCheckpointStore::default();
 
@@ -434,6 +491,15 @@ async fn initial_snapshot_is_acknowledged_before_handoff_to_the_captured_offset(
 
     assert_eq!(handoff, captured.clone());
     assert_eq!(sink.operations, vec!["Snapshot", "Snapshot"]);
+    assert_eq!(sink.incremental_event_ids, vec!["incremental:event-1"]);
+    assert_eq!(
+        sink.sequence,
+        vec!["snapshot", "snapshot", "ack", "incremental"]
+    );
+    assert_eq!(
+        source.incremental_starts,
+        vec![captured.clone(), captured.clone()]
+    );
     assert_eq!(sink.completions.len(), 1);
     assert_eq!(sink.completions[0].captured_offset, captured.clone());
     assert_eq!(sink.completions[0].row_count, 2);

@@ -103,9 +103,11 @@ consistent snapshot. The prototype proves:
 - offset-aware RFC 3339 `timestamp` lookup selects the complete transaction covering the time and
   persists the resolved offset for restart;
 - missing or purged history fails without falling back to another mode;
-- `initial` requires InnoDB, a non-null stable unique key, and an idempotent snapshot sink;
+- `initial` requires InnoDB, a primary or non-null unique key with key-ordered pagination, and an
+  idempotent snapshot sink;
 - snapshot rows use `operation="snapshot"`, stable key-based event IDs, and are acknowledged before
-  a `snapshot_complete` checkpoint captures the incremental handoff offset;
+  a `snapshot_complete` checkpoint captures the incremental handoff offset; the incremental seam
+  then consumes events from that exact captured offset;
 - a failed snapshot leaves no checkpoint, so the next run starts a fresh consistent snapshot.
 
 `tests/startup.rs` contains the deterministic startup proofs. The real MySQL adapter remains
