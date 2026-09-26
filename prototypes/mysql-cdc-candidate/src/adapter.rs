@@ -368,7 +368,15 @@ impl MySqlAsyncReplicationClient {
                 Ok(result)
             }
             EventData::QueryEvent(query) => {
-                match query.query().trim().to_ascii_uppercase().as_str() {
+                let statement = query.query().trim().to_owned();
+                if let Some(table) = schema_change_table(&statement) {
+                    return Ok(RawReplicationEvent::SchemaChanged {
+                        database: self.config.database.clone(),
+                        table,
+                        offset: self.current_offset(log_position),
+                    });
+                }
+                match statement.to_ascii_uppercase().as_str() {
                     "BEGIN" => {
                         if self.current_gtid.is_some() {
                             Ok(RawReplicationEvent::Harmless)
@@ -600,6 +608,34 @@ fn mysql_value_to_cdc(value: Value) -> CdcValue {
             micros,
         },
     }
+}
+
+fn schema_change_table(statement: &str) -> Option<String> {
+    let tokens = statement
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let command = tokens.first()?.to_ascii_uppercase();
+    if !matches!(
+        command.as_str(),
+        "ALTER" | "CREATE" | "DROP" | "RENAME" | "TRUNCATE"
+    ) {
+        return None;
+    }
+    let table_index = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("TABLE"))?;
+    tokens
+        .iter()
+        .skip(table_index + 1)
+        .find(|token| {
+            !token.eq_ignore_ascii_case("IF")
+                && !token.eq_ignore_ascii_case("NOT")
+                && !token.eq_ignore_ascii_case("EXISTS")
+                && !token.eq_ignore_ascii_case("OR")
+                && !token.eq_ignore_ascii_case("REPLACE")
+        })
+        .map(|table| (*table).to_owned())
 }
 
 fn format_gtid(sid: [u8; 16], tag: Option<String>, gno: u64) -> String {

@@ -68,7 +68,7 @@ impl CdcOffset {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(rename_all = "snake_case")]
 pub enum CdcValue {
     Null,
     Bool(bool),

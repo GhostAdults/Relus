@@ -1,6 +1,6 @@
 # Relus MySQL CDC candidate prototype
 
-Independent prototype for GitHub issues #29 through #32. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
+Independent prototype for GitHub issues #29 through #33. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
 
 Selected dependency:
 
@@ -121,3 +121,40 @@ markers fail closed because upstream decompression failures are not surfaced rel
 ## Optional MySQL 8.0 run
 
 The streaming binary only connects when all required `RELUS_TEST_MYSQL80_*` variables are supplied, including `BINLOG_FILE`, `BINLOG_POSITION`, and `SERVER_ID`. It prints versioned JSON messages. The #29 slice implements file/position and GTID-set streaming; #30 adds TLS configuration, authentication verification, and controlled cancellation; #31 adds the independent recovery loop and crash proofs; #32 adds startup-mode and snapshot-handoff proofs. Production Reader integration remains outside the approved prototype scope.
+
+## Issue #33 boundedness and fidelity update
+
+Date: 2026-09-26
+
+The prototype now contains deterministic seams for the boundedness and data-fidelity gates:
+
+- `BoundedEventBuffer` limits both queued event count and estimated serialized bytes. A slow
+  consumer makes the producer await capacity, oversized messages fail before enqueue, and metrics
+  expose current and peak event/byte usage.
+- The transaction assembler emits row messages incrementally, retains only transaction counters,
+  preserves cross-table row order, and emits the checkpoint-eligible boundary only at COMMIT.
+- `CdcValue` uses an unambiguous externally tagged representation so signed/unsigned integers,
+  floating point values, byte strings, decimal text, UTF-8 text, zero dates, and temporal values
+  round-trip without the prior Date/DateTime ambiguity.
+- Schema validation rejects spatial types. DDL query events and observed schema changes fail with
+  `SchemaDrift`; they are never treated as harmless events or allowed to advance a checkpoint.
+- `measure_bounded_load` records throughput and peak resource use, while `compare_to_baseline`
+  applies the required 80 percent gate.
+
+The deterministic evidence is in `tests/bounded.rs`, `tests/data_fidelity.rs`,
+`tests/performance.rs`, and the transaction unit tests. A live comparison against the current
+`mysql_cdc` reader, sustained MySQL load, and process-level memory sampling are still `not_run`
+because no versioned MySQL test environment or baseline run was available in this execution.
+
+| Issue #33 evidence item | Result |
+| --- | --- |
+| Event and estimated-byte limits apply producer backpressure | `passed` |
+| Buffer metrics stay within configured limits under slow consumption | `passed` |
+| Large transactions stream rows and checkpoint only at COMMIT | `passed` |
+| Multi-table transaction order is preserved | `passed` |
+| Common value matrix round-trips without integer/decimal loss | `passed` |
+| Unsupported spatial types fail validation | `passed` |
+| Schema changes stop safely without checkpoint advancement | `passed` |
+| 80 percent performance gate logic | `passed` |
+| Current `mysql_cdc` baseline in the same environment | `not_run` |
+| Sustained live throughput, memory, and MySQL load gate | `not_run` |

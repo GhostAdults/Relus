@@ -10,6 +10,7 @@ pub enum ReplicationErrorKind {
     InvalidOffset,
     BinlogPurged,
     Decode,
+    SchemaDrift,
     UnsupportedEvent,
     Protocol,
     Shutdown,

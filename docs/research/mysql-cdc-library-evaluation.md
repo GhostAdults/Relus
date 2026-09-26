@@ -357,3 +357,46 @@ next run starts a new consistent snapshot from the beginning.
 | Missing or purged history fails without fallback | `passed` |
 | Non-InnoDB and unstable-key rejection | `passed` |
 | Live MySQL startup-mode and snapshot runs | `not_run` (versioned environment unavailable) |
+
+## Issue #33 boundedness and fidelity update
+
+Date: 2026-09-26
+
+Issue #33 adds boundedness, data-fidelity, schema-safety, and synthetic-load evidence to the
+isolated prototype. The new `BoundedEventBuffer` acquires permits for both queue slots and
+estimated serialized bytes before enqueue. A slow consumer therefore pauses the producer rather
+than allowing an unbounded in-memory queue; oversized messages fail before they can enter the
+buffer. Current and peak event/byte metrics are exposed for the verification harness.
+
+The transaction assembler remains streaming: it emits each row batch immediately, keeps only
+transaction counters, preserves the source order across tables, and emits a `Commit` message only
+at COMMIT. The 100,000-row deterministic proof completes without retaining the transaction's row
+payloads in the assembler. The checkpoint/recovery path already advances only after the sink
+acknowledges that commit.
+
+`CdcValue` now uses an unambiguous externally tagged JSON representation. This prevents a
+`DateTime` value from being decoded as the shorter `Date` variant and preserves the agreed matrix's
+integer, decimal-text, floating-point, binary, UTF-8, zero-date, JSON/text, enum/set, bit, and
+time values. Spatial MySQL types fail schema validation. DDL query events and schema registry
+drift return the non-retryable `SchemaDrift` error instead of being ignored.
+
+`measure_bounded_load` records candidate throughput and peak resource use, and
+`compare_to_baseline` implements the required 80 percent threshold. The deterministic tests pass
+for the buffer, type matrix, schema failure, transaction ordering, 100,000-row stream, and gate
+calculation.
+
+| Issue #33 evidence item | Result |
+| --- | --- |
+| Event-count and estimated-byte backpressure | `passed` |
+| Slow-consumer buffer use stays within configured limits | `passed` |
+| Large transaction does not accumulate rows in the assembler | `passed` |
+| Multi-table source commit order | `passed` |
+| Common MySQL value matrix | `passed` |
+| Unsupported spatial schema validation | `passed` |
+| Schema change stops without checkpoint advancement | `passed` |
+| 80 percent candidate-vs-baseline gate logic | `passed` |
+| Comparable current `mysql_cdc` baseline in this environment | `not_run` |
+| Sustained live throughput, process memory, and MySQL version load | `not_run` |
+
+These are isolated prototype proofs. They do not claim a live performance pass, do not replace the
+production Reader, and do not authorize removing `mysql_cdc` or OpenSSL from the workspace.

@@ -30,6 +30,11 @@ pub enum RawReplicationEvent {
         table_id: u64,
         offset: CdcOffset,
     },
+    SchemaChanged {
+        database: String,
+        table: String,
+        offset: CdcOffset,
+    },
     Heartbeat {
         offset: CdcOffset,
     },
@@ -96,6 +101,13 @@ impl TransactionAssembler {
                 table_id,
                 offset,
             }]),
+            RawReplicationEvent::SchemaChanged {
+                database, table, ..
+            } => Err(ReplicationError::new(
+                ReplicationErrorKind::SchemaDrift,
+                false,
+                format!("schema changed for {database}.{table}"),
+            )),
             RawReplicationEvent::Rotate {
                 file,
                 position,
@@ -340,5 +352,92 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn multi_table_transaction_preserves_row_order_until_commit() -> Result<(), ReplicationError> {
+        let offset = CdcOffset::Position {
+            file: "mysql-bin.000004".to_owned(),
+            position: 100,
+        };
+        let mut assembler = TransactionAssembler::default();
+        assembler.push(RawReplicationEvent::Begin {
+            transaction_id: "tx-1".to_owned(),
+            offset: offset.clone(),
+        })?;
+        let messages = assembler.push(RawReplicationEvent::Row {
+            timestamp_seconds: 123,
+            offset: offset.clone(),
+            rows: vec![row("sales", "orders", 1), row("sales", "items", 2)],
+        })?;
+        let CdcMessage::Row(first) = &messages[0] else {
+            panic!("expected first row");
+        };
+        let CdcMessage::Row(second) = &messages[1] else {
+            panic!("expected second row");
+        };
+        assert_eq!(first.change.table, "orders");
+        assert_eq!(second.change.table, "items");
+        assert_eq!(first.transaction_event_index, 0);
+        assert_eq!(second.row_index, 1);
+        let commit = assembler.push(RawReplicationEvent::Commit {
+            offset: offset.with_position("mysql-bin.000004", 180),
+        })?;
+        assert!(matches!(&commit[0], CdcMessage::Commit(value) if value.event_count == 2));
+        Ok(())
+    }
+
+    #[test]
+    fn large_transaction_emits_rows_incrementally_and_commits_only_at_boundary(
+    ) -> Result<(), ReplicationError> {
+        let offset = CdcOffset::Position {
+            file: "mysql-bin.000005".to_owned(),
+            position: 100,
+        };
+        let mut assembler = TransactionAssembler::default();
+        assembler.push(RawReplicationEvent::Begin {
+            transaction_id: "large-tx".to_owned(),
+            offset: offset.clone(),
+        })?;
+        for id in 0..100_000 {
+            let messages = assembler.push(RawReplicationEvent::Row {
+                timestamp_seconds: 123,
+                offset: offset.clone(),
+                rows: vec![row(
+                    "sales",
+                    if id % 2 == 0 { "orders" } else { "items" },
+                    id,
+                )],
+            })?;
+            assert_eq!(messages.len(), 1);
+            assert!(assembler.has_active_transaction());
+        }
+        let commit = assembler.push(RawReplicationEvent::Commit {
+            offset: offset.with_position("mysql-bin.000005", 200),
+        })?;
+        assert!(matches!(&commit[0], CdcMessage::Commit(value) if value.event_count == 100_000));
+        assert!(!assembler.has_active_transaction());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_changes_stop_without_advancing_transaction_state() {
+        let mut assembler = TransactionAssembler::default();
+        let result = assembler.push(RawReplicationEvent::SchemaChanged {
+            database: "sales".to_owned(),
+            table: "orders".to_owned(),
+            offset: CdcOffset::Position {
+                file: "mysql-bin.000006".to_owned(),
+                position: 300,
+            },
+        });
+        assert!(matches!(
+            result,
+            Err(ReplicationError {
+                kind: ReplicationErrorKind::SchemaDrift,
+                ..
+            })
+        ));
+        assert!(!assembler.has_active_transaction());
     }
 }
