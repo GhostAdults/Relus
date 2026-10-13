@@ -74,17 +74,19 @@ pub async fn start(host: String, port: u16, app_state: SharedState) -> anyhow::R
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl+C handler");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        unix::signal(SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match unix::signal(SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::error!(%error, "failed to install terminate signal handler"),
+        }
     };
 
     #[cfg(not(unix))]

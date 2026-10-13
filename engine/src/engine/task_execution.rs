@@ -135,14 +135,14 @@ impl TaskExecutionService {
         let observer: Arc<dyn TaskLifecycleObserver> = Arc::new(StateObserver {
             repository: self.repository.clone(),
             task_ids: group.tasks.iter().map(|t| t.task.id).collect(),
-            errors: lifecycle_errors.clone(),
+            errors: Arc::clone(&lifecycle_errors),
         });
         let task_ids: Vec<TaskId> = group.tasks.iter().map(|t| t.task.id).collect();
         let task_ids_for_future = task_ids.clone();
         let repo = self.repository.clone();
         let group_id = group.group.id;
         let cancel_for_task = cancel.clone();
-        let lifecycle_errors_for_future = lifecycle_errors.clone();
+        let lifecycle_errors_for_future = Arc::clone(&lifecycle_errors);
         let fut = Box::pin(async move {
             if group.tasks.is_empty() {
                 repo.update_task_group(group_id, TaskGroupState::RUNNING)

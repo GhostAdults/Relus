@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use relus_mysql_cdc_candidate::{
-    prepare_startup, BinlogTransactionBoundary, CdcEnvelope, CdcOffset, CdcValue, CheckpointPhase,
-    InitialSnapshotSource, PersistentTestCheckpoint, ReplicationError, ReplicationErrorKind,
-    SnapshotCompletion, SnapshotCursor, SnapshotRow, SnapshotSink, StartupMode,
-    StartupOffsetProvider, TestCheckpointStore,
+    prepare_startup, BinlogTransactionBoundary, CdcEnvelope, CdcOffset, CdcRow, CdcValue,
+    CheckpointPhase, InitialSnapshotSource, PersistentTestCheckpoint, ReplicationError,
+    ReplicationErrorKind, SnapshotCompletion, SnapshotCursor, SnapshotRow, SnapshotSink,
+    StartupMode, StartupOffsetProvider, TestCheckpointStore,
 };
 
 #[derive(Default)]
@@ -173,7 +174,7 @@ impl SnapshotSink for RecordingSnapshotSink {
         self.idempotent
     }
     async fn write_snapshot(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError> {
-        self.event_ids.push(envelope.event_id.clone());
+        self.event_ids.push(envelope.event_id.to_string());
         self.sequence.push("snapshot".to_owned());
         self.operations
             .push(format!("{:?}", envelope.change.operation));
@@ -200,7 +201,8 @@ impl SnapshotSink for RecordingSnapshotSink {
     }
 
     async fn write_incremental(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError> {
-        self.incremental_event_ids.push(envelope.event_id.clone());
+        self.incremental_event_ids
+            .push(envelope.event_id.to_string());
         self.sequence.push("incremental".to_owned());
         Ok(())
     }
@@ -235,19 +237,19 @@ fn snapshot_row(id: u64) -> SnapshotRow {
 fn incremental_envelope(offset: CdcOffset) -> CdcEnvelope {
     CdcEnvelope {
         schema_version: 1,
-        event_id: "incremental:event-1".to_owned(),
-        transaction_id: "tx-1".to_owned(),
+        event_id: "incremental:event-1".into(),
+        transaction_id: Arc::from("tx-1"),
         transaction_event_index: 0,
         row_index: 0,
         event_timestamp_seconds: 1,
-        offset,
+        offset: Arc::new(offset),
         change: relus_mysql_cdc_candidate::RowChange {
-            database: "sales".to_owned(),
-            table: "orders".to_owned(),
+            database: Arc::from("sales"),
+            table: Arc::from("orders"),
             operation: relus_mysql_cdc_candidate::CdcOperation::Insert,
-            key: BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(3))]),
+            key: CdcRow::from([("id".to_owned(), CdcValue::Unsigned(3))]),
             before: None,
-            after: Some(BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(3))])),
+            after: Some(CdcRow::from([("id".to_owned(), CdcValue::Unsigned(3))])),
         },
     }
 }

@@ -1,8 +1,85 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::Deserializer,
+    ser::{SerializeMap, Serializer},
+    Deserialize, Serialize,
+};
 
 pub const CDC_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Eq)]
+pub enum CdcEventId {
+    Text(String),
+    Row { prefix: Arc<str>, row_index: u64 },
+}
+
+impl CdcEventId {
+    pub(crate) fn row(prefix: Arc<str>, row_index: u64) -> Self {
+        Self::Row { prefix, row_index }
+    }
+}
+
+impl fmt::Display for CdcEventId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(value) => formatter.write_str(value),
+            Self::Row { prefix, row_index } => write!(formatter, "{prefix}{row_index}"),
+        }
+    }
+}
+
+impl PartialEq for CdcEventId {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Text(left), Self::Text(right)) => left == right,
+            (
+                Self::Row {
+                    prefix: left_prefix,
+                    row_index: left_index,
+                },
+                Self::Row {
+                    prefix: right_prefix,
+                    row_index: right_index,
+                },
+            ) => left_prefix == right_prefix && left_index == right_index,
+            _ => self.to_string() == other.to_string(),
+        }
+    }
+}
+
+impl From<String> for CdcEventId {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for CdcEventId {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+impl Serialize for CdcEventId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Text(value) => serializer.serialize_str(value),
+            Self::Row { .. } => serializer.collect_str(self),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CdcEventId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::Text)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -101,7 +178,96 @@ pub enum CdcValue {
     },
 }
 
-pub type CdcRow = BTreeMap<String, CdcValue>;
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CdcRow(Vec<(Arc<str>, CdcValue)>);
+
+impl CdcRow {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn from_sorted_entries(entries: Vec<(Arc<str>, CdcValue)>) -> Self {
+        debug_assert!(entries
+            .windows(2)
+            .all(|pair| pair[0].0.as_ref() <= pair[1].0.as_ref()));
+        Self(entries)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn insert(&mut self, column: impl Into<Arc<str>>, value: CdcValue) -> Option<CdcValue> {
+        let column = column.into();
+        match self
+            .0
+            .binary_search_by(|(existing, _)| existing.as_ref().cmp(column.as_ref()))
+        {
+            Ok(index) => Some(std::mem::replace(&mut self.0[index].1, value)),
+            Err(index) => {
+                self.0.insert(index, (column, value));
+                None
+            }
+        }
+    }
+
+    pub fn get(&self, column: &str) -> Option<&CdcValue> {
+        self.0
+            .binary_search_by(|(existing, _)| existing.as_ref().cmp(column))
+            .ok()
+            .map(|index| &self.0[index].1)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &CdcValue> {
+        self.0.iter().map(|(_, value)| value)
+    }
+}
+
+impl<K, const N: usize> From<[(K, CdcValue); N]> for CdcRow
+where
+    K: Into<Arc<str>>,
+{
+    fn from(entries: [(K, CdcValue); N]) -> Self {
+        let mut row = Self::new();
+        for (column, value) in entries {
+            row.insert(column, value);
+        }
+        row
+    }
+}
+
+impl From<BTreeMap<String, CdcValue>> for CdcRow {
+    fn from(entries: BTreeMap<String, CdcValue>) -> Self {
+        Self::from_sorted_entries(
+            entries
+                .into_iter()
+                .map(|(column, value)| (Arc::from(column), value))
+                .collect(),
+        )
+    }
+}
+
+impl Serialize for CdcRow {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (column, value) in &self.0 {
+            map.serialize_entry(column.as_ref(), value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CdcRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BTreeMap::<String, CdcValue>::deserialize(deserializer).map(Self::from)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,8 +280,8 @@ pub enum CdcOperation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowChange {
-    pub database: String,
-    pub table: String,
+    pub database: Arc<str>,
+    pub table: Arc<str>,
     pub operation: CdcOperation,
     pub key: CdcRow,
     pub before: Option<CdcRow>,
@@ -125,12 +291,12 @@ pub struct RowChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CdcEnvelope {
     pub schema_version: u32,
-    pub event_id: String,
-    pub transaction_id: String,
+    pub event_id: CdcEventId,
+    pub transaction_id: Arc<str>,
     pub transaction_event_index: u64,
     pub row_index: u64,
     pub event_timestamp_seconds: u32,
-    pub offset: CdcOffset,
+    pub offset: Arc<CdcOffset>,
     pub change: RowChange,
 }
 
@@ -138,8 +304,8 @@ pub struct CdcEnvelope {
 pub struct TransactionCommit {
     pub schema_version: u32,
     pub event_id: String,
-    pub transaction_id: String,
-    pub offset: CdcOffset,
+    pub transaction_id: Arc<str>,
+    pub offset: Arc<CdcOffset>,
     pub event_count: u64,
 }
 

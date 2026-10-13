@@ -1,18 +1,18 @@
 pub mod api_reader;
-pub mod binlog_reader;
 pub mod database_reader;
+pub mod mysql_cdc;
 pub mod rdbms_reader_util;
 
 pub use api_reader::{ApiJob, ApiReader};
-pub use binlog_reader::{BinlogConfig, BinlogReader, CdcOp};
 pub use database_reader::{DatabaseJob, DatabaseReader};
+pub use mysql_cdc::MySqlCdcReader;
 pub use rdbms_reader_util::rdbms_reader::{
     count_total_records, execute_query_stream, DbRowStream, RdbmsConfig, RdbmsReader,
 };
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
-use relus_common::job_config::JobConfig;
+use relus_common::{cdc::SinkRequirements, job_config::JobConfig, PipelineMessage};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -27,6 +27,9 @@ pub type Source = Arc<dyn DataReader>;
 
 /// Reader 返回的原始数据流
 pub type JsonStream = Pin<Box<dyn Stream<Item = Result<JsonValue>> + Send + 'static>>;
+
+/// CDC Readers can bypass the batch JSON mapping path and emit transaction-aware messages.
+pub type PipelineStream = Pin<Box<dyn Stream<Item = Result<PipelineMessage>> + Send + 'static>>;
 
 /// Stream 模式：Batch(批量) / Streaming(流式)
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq)]
@@ -57,12 +60,20 @@ pub struct SplitReaderResult {
 pub trait DataReaderJob: Send + Sync {
     async fn split(&self, reader_threads: usize) -> Result<SplitReaderResult>;
     fn description(&self) -> String;
+
+    fn sink_requirements(&self) -> SinkRequirements {
+        SinkRequirements::default()
+    }
 }
 
 /// Reader Task trait
 #[async_trait::async_trait]
 pub trait DataReaderTask: Send + Sync {
     async fn read_data(&self, task: &ReadTask) -> Result<JsonStream>;
+
+    async fn read_pipeline(&self, _task: &ReadTask) -> Result<Option<PipelineStream>> {
+        Ok(None)
+    }
 
     fn shutdown(&self) {}
 }
@@ -183,10 +194,21 @@ inventory::submit! {
 
 inventory::submit! {
     ReaderPlugin {
-        source_type: "mysql_binlog",
+        source_type: "mysql_cdc",
         create: |config| {
-            let reader = BinlogReader::init(config)?;
+            let reader = MySqlCdcReader::init(config)?;
             Ok(Arc::new(reader))
+        },
+    }
+}
+
+inventory::submit! {
+    ReaderPlugin {
+        source_type: "mysql_binlog",
+        create: |_config| {
+            Err(anyhow::anyhow!(
+                "mysql_binlog configuration migration required: use source.type mysql_cdc"
+            ))
         },
     }
 }

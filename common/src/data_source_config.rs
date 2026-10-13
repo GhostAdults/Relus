@@ -8,6 +8,8 @@ pub struct DataSourceConfig {
     pub name: String,
     #[serde(rename = "type")]
     pub source_type: String,
+    #[serde(default)]
+    pub config_version: Option<u32>,
     #[serde(default = "default_is_table_mode")]
     pub is_table_mode: bool,
     pub query_sql: Option<Vec<String>>,

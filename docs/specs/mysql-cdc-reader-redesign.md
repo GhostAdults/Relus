@@ -736,9 +736,9 @@ prototypes/mysql-cdc-candidate/
 ### Phase 3: Available local verification
 
 - 使用本机 MySQL 8.0 进行正式目标版本实测。
-- 使用本机 MySQL 5.6 做非承诺兼容性参考，不代替 MySQL 5.7。
+- 使用本机 MySQL 5.6 进行当前迁移范围内的正式版本实测。
 - Windows MSVC 运行完整集成测试。
-- 当前不可用的 MySQL 5.7、8.4、Linux 运行和其他平台保持 `not_run`。
+- 当前范围外的 MySQL 5.7、8.4，以及因环境变更暂缓的 Linux 和其他平台保持 `not_run`。
 - 生成脱敏报告。
 
 **当前执行授权到此结束。**
@@ -746,9 +746,8 @@ prototypes/mysql-cdc-candidate/
 ### Phase 4: Complete formal evidence matrix
 
 - 补齐 MySQL 5.7、8.4。
-- Linux x86_64 运行完整集成测试。
-- 验证 Windows GNU、Linux ARM64、macOS Apple Silicon 和 MUSL 编译。
-- 只有全部正式硬门槛有证据后，才允许进入生产迁移。
+- Linux、ARM64、macOS Apple Silicon 和 MUSL 目标验证延期到环境变更完成后。
+- 完成剩余 Windows 验证、性能/资源、许可证和 MSRV 门槛后，才允许请求生产迁移。
 
 ### Phase 5: Production Reader migration
 
@@ -872,23 +871,26 @@ Failpoint 必须覆盖：
 | --- | --- | --- |
 | Windows MSVC | Required | Required |
 | Windows GNU | Not required initially | Required |
-| Linux x86_64 | Required before production migration | Required |
-| Linux ARM64 | Not required initially | Required |
-| macOS Apple Silicon | Not required initially | Required |
-| MUSL | Build/static target required | Required |
+| Linux x86_64 | Deferred; environment change required | Deferred |
+| Linux ARM64 | Deferred; environment change required | Deferred |
+| macOS Apple Silicon | Deferred; environment change required | Deferred |
+| MUSL | Deferred; environment change required | Deferred |
 
-本轮在 Windows 实测。Linux 使用相同验收脚本由未来 Linux 环境执行；在没有实际结果前保持 `not_run`。
+本轮在 Windows 实测。Linux、ARM64、macOS Apple Silicon 和 MUSL 因环境变更成本暂移出当前
+必须确认项，继续记录为 `not_run`，不阻断本轮候选决定。
 
 ## 23. MySQL Version Matrix
 
 | Version | Support status | Current local evidence |
 | --- | --- | --- |
-| MySQL 5.6 | Compatibility only, not promised | Available locally |
-| MySQL 5.7 | Formal target | `not_run` until environment exists |
-| MySQL 8.0 | Formal target | Available locally |
-| MySQL 8.4 LTS | Formal target | `not_run` until environment exists |
+| MySQL 5.6 | Formal target for the current migration scope | Available locally |
+| MySQL 5.7 | Outside the current migration scope | `not_run` |
+| MySQL 8.0 | Formal target for the current migration scope | Available locally |
+| MySQL 8.4 LTS | Outside the current migration scope | `not_run` |
 
-5.6 通过不能替代 5.7 或 8.4。缺少 GTID、TLS 或权限时，对应能力标记 `not_run`，不修改服务器来制造测试条件。
+当前生产迁移范围只承诺 MySQL 5.6 和 8.0。两者通过不构成 MySQL 5.7 或 8.4
+兼容性声明；未来若将 5.7 或 8.4 加回正式范围，必须补充对应的独立实测证据。
+缺少某个版本适用的 GTID、TLS 或权限时，对应能力标记 `not_run`，不修改服务器来制造测试条件。
 
 ## 24. Reporting
 
@@ -925,7 +927,9 @@ docs/research/mysql-cdc-library-evaluation.md
 - `conditionally_recommended`
 - `rejected`
 
-当前缺少 MySQL 5.7、8.4 和 Linux 实测时，最高只能是 `conditionally_recommended`。
+MySQL 5.7 和 8.4 当前不属于迁移范围，其 `not_run` 不阻断本轮候选。Linux 及其他延期平台
+也不阻断本轮候选；性能、资源、许可证、MSRV、Windows 集成或适用版本运行证据不足时，
+最高只能是 `conditionally_recommended`。
 
 报告只记录版本、平台、命令、结果和脱敏标识。不得包含主机/IP、数据库账号、证书绝对路径、用户目录、完整 URL、server UUID 或凭证。
 
@@ -939,8 +943,8 @@ docs/research/mysql-cdc-library-evaluation.md
 4. 独立原型不进入默认 workspace，不修改生产 Reader。
 5. 原型依赖树没有 `openssl` 或 `openssl-sys`。
 6. Windows MSVC 上完成可用环境允许的真实测试。
-7. MySQL 8.0 正式测试结果和 MySQL 5.6 兼容性结果如实记录。
-8. 缺少的 MySQL 5.7、8.4、Linux 和其他平台证据标记为 `not_run`。
+7. MySQL 5.6 和 8.0 当前正式范围的测试结果如实记录。
+8. 范围外的 MySQL 5.7、8.4，以及延期的 Linux 和其他平台证据标记为 `not_run`。
 9. 证书只通过路径配置，执行代理不读取其内容。
 10. 测试只修改当前 run 创建的数据库对象，不修改服务器级状态。
 11. 性能、内存、背压和恢复结果进入脱敏报告。
@@ -950,14 +954,51 @@ docs/research/mysql-cdc-library-evaluation.md
 
 只有以下条件全部满足，才能请求开始生产迁移：
 
-1. MySQL 5.7、8.0、8.4 正式硬门槛全部实际运行通过。
-2. Windows MSVC 与 Linux x86_64 完整集成测试通过。
-3. Windows GNU、Linux ARM64、macOS Apple Silicon、MUSL 编译验证通过。
-4. TLS、GTID、file/position、事务、恢复、认证和常用类型通过。
-5. 候选依赖树完全没有 OpenSSL。
-6. 性能和资源门槛通过。
-7. 许可证和 MSRV 满足要求。
-8. 原型报告列出并解决所有 `blocked` 项。
-9. 用户审阅报告并明确批准生产迁移。
+1. 当前范围内 MySQL 5.6 和 8.0 的版本适用硬门槛全部实际运行通过：5.6 必须通过
+   ROW binlog、file/position、GTID、`mysql_native_password`、事务、恢复、取消和常用类型；
+   8.0 必须通过 GTID、`caching_sha2_password`、encrypted TLS、file/position、事务、
+   恢复、取消和常用类型。verified TLS、错误 CA、错误服务器身份和 mTLS 为可选后续证据，
+   不属于当前门槛。
+2. Windows MSVC 与 Windows GNU 的适用集成/编译检查通过。
+3. 各版本适用的传输安全策略、GTID、file/position、事务、恢复、认证和常用类型通过：
+   5.6 的当前门槛为其明文策略与版本适用能力，8.0 的当前门槛包含 encrypted TLS。
+4. 候选依赖树完全没有 OpenSSL。
+5. 性能和资源门槛通过。
+6. 许可证和 MSRV 满足要求。
+7. 原型报告列出并解决所有 `blocked` 项。
+8. 用户审阅报告并明确批准生产迁移。
 
 在这些条件完成前，候选只能被描述为暂定或有条件推荐。
+
+### 26.1 Gate closure record (2026-10-12)
+
+当前批准范围内的八项生产迁移门槛均已通过，候选状态更新为
+`recommended_for_production_migration`：
+
+- MySQL 5.6 和 8.0 已完成真实 DML、自动元数据映射、file/position 与 GTID 恢复验证。
+- Windows GNU、Windows MSVC、OpenSSL-free 依赖树、性能、资源和 MSRV 证据通过。
+- 项目负责人已接受解析后的传递许可证集合，并明确批准生产迁移。
+- 当前范围内没有未解决的 `blocked` 项。旧 Reader 的 vendored-OpenSSL 构建问题属于迁移后
+  删除的过渡依赖诊断，不是所选候选的门槛；已生成 Windows MSVC baseline 可执行文件。
+- Linux、ARM64、macOS Apple Silicon、MUSL、MySQL 5.7 和 8.4 按已批准范围继续延期或位于
+  范围外；verified TLS、错误 CA/服务器身份和 mTLS 继续作为可选证据。
+
+该记录授权开始单独的生产 Reader 迁移，但不表示迁移代码已经实施，也不授权扩大当前
+MySQL 版本或目标平台范围。
+
+### 26.2 Production migration implementation record (2026-10-12)
+
+用户明确批准后，Phase 5 和 Phase 6 已在工作树中实施：生产 Reader 已切换到
+`mysql_async 0.37.1` Rustls-only 适配器，Reader/Engine/Writer 的事务确认边界和 Redb
+checkpoint 已接通，旧 `mysql_cdc` 与根工作区 OpenSSL 依赖已移除。`initial` 已实现一致性
+快照到增量的切换；`require_empty` 与 `upsert` 策略会按声明执行，`truncate_then_load` 在
+Sink 尚无安全能力声明时明确拒绝。
+
+生产实现的 checkpoint 使用版本化 Redb 记录，并绑定 `source_id`、MySQL `server_uuid`、
+数据库、表规则指纹和 Schema 指纹。GTID 事务只有在 Sink ACK 后才合并进 resume set；
+配置、服务端身份或 Schema 变化时拒绝静默复用旧 checkpoint。主键发生变化的 UPDATE 会
+按“删除旧键、幂等写入新键”执行，任一步失败都不会确认事务。BINARY、VARBINARY、BLOB、
+BIT 等类型按 `information_schema` 元数据映射为字节，不再用 UTF-8 成功与否猜测文本/二进制。
+
+本记录不表示完整 Phase 7 管理面、CLI checkpoint 管理或 exactly-once 已完成，也不扩大
+MySQL 5.6/8.0 与 Windows GNU/MSVC 之外的当前承诺范围。

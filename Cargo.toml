@@ -29,7 +29,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.93.0"
+rust-version = "1.94.0"
 
 [workspace.dependencies]
 relus_core = { path = "core" }
@@ -67,6 +67,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_path_to_error = "0.1"
 tracing = "0.1"
+thiserror = "2"
 indicatif = "0.17"
 anyhow = "1.0"
 axum = "0.7"
@@ -76,8 +77,13 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 inventory = "0.3"
-mysql_cdc = "0.2"
-openssl = { version = "0.10", features = ["vendored"] }
+mysql_async = { version = "=0.37.1", default-features = false, features = [
+    "minimal-rust",
+    "rustls-tls",
+    "ring",
+    "tls12",
+    "binlog",
+] }
 cron = "0.15"
 rustyline = "15"
 sqlx = { version = "0.8", default-features = false, features = [
@@ -97,7 +103,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 # 3 - 全部优化（最慢编译，最快运行）
 # "s" - 优化大小
 # "z" - 更激进的大小优化
-opt-level = 0     # 无优化
+opt-level = 2     # 无优化
 lto = false       # 启用链接时优化
 codegen-units = 1 # 减少代码生成单元以提高性能
 

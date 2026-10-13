@@ -82,7 +82,7 @@
   <rect class="plugin" x="80" y="580" width="305" height="92"/>
   <text class="box-title" x="102" y="606">relus_reader</text>
   <text class="box-text" x="102" y="630">DataReaderJob + DataReaderTask</text>
-  <text class="box-text" x="102" y="651">api, database, mysql_binlog</text>
+  <text class="box-text" x="102" y="651">api, database, mysql_cdc</text>
   <text class="mono" x="102" y="666">inventory::ReaderPlugin</text>
 
   <rect class="plugin" x="490" y="580" width="305" height="92"/>

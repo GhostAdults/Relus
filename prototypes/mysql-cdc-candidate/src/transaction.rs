@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use crate::{
     envelope::{
-        CdcEnvelope, CdcMessage, CdcOffset, RowChange, TransactionCommit, CDC_SCHEMA_VERSION,
+        CdcEnvelope, CdcEventId, CdcMessage, CdcOffset, RowChange, TransactionCommit,
+        CDC_SCHEMA_VERSION,
     },
     error::{ReplicationError, ReplicationErrorKind},
 };
@@ -51,7 +54,7 @@ pub struct TransactionAssembler {
 
 #[derive(Debug)]
 struct ActiveTransaction {
-    transaction_id: String,
+    transaction_id: Arc<str>,
     start_offset: CdcOffset,
     next_event_index: u64,
     emitted_rows: u64,
@@ -75,7 +78,7 @@ impl TransactionAssembler {
                     return Err(protocol_error("received a nested transaction boundary"));
                 }
                 self.active = Some(ActiveTransaction {
-                    transaction_id,
+                    transaction_id: transaction_id.into(),
                     start_offset: offset,
                     next_event_index: 0,
                     emitted_rows: 0,
@@ -142,7 +145,7 @@ impl TransactionAssembler {
         if self.active.is_none() {
             let transaction_id = offset.transaction_id();
             self.active = Some(ActiveTransaction {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 start_offset: offset.clone(),
                 next_event_index: 0,
                 emitted_rows: 0,
@@ -157,6 +160,9 @@ impl TransactionAssembler {
         }
         let event_index = active.next_event_index;
         active.next_event_index += 1;
+        let offset = Arc::new(offset);
+        let event_id_prefix: Arc<str> =
+            stable_event_id_prefix(&active.transaction_id, &offset, event_index).into();
 
         let messages = rows
             .into_iter()
@@ -164,8 +170,7 @@ impl TransactionAssembler {
             .map(|(row_index, change)| {
                 active.emitted_rows += 1;
                 let row_index = row_index as u64;
-                let event_id =
-                    stable_event_id(&active.transaction_id, &offset, event_index, row_index);
+                let event_id = CdcEventId::row(Arc::clone(&event_id_prefix), row_index);
                 CdcMessage::Row(CdcEnvelope {
                     schema_version: CDC_SCHEMA_VERSION,
                     event_id,
@@ -186,11 +191,12 @@ impl TransactionAssembler {
             .active
             .take()
             .ok_or_else(|| protocol_error("received COMMIT without an active transaction"))?;
-        let transaction_id = if active.transaction_id.is_empty() {
-            active.start_offset.transaction_id()
+        let transaction_id: Arc<str> = if active.transaction_id.is_empty() {
+            active.start_offset.transaction_id().into()
         } else {
             active.transaction_id
         };
+        let offset = Arc::new(offset);
         Ok(vec![CdcMessage::Commit(TransactionCommit {
             schema_version: CDC_SCHEMA_VERSION,
             event_id: control_event_id("commit", &offset),
@@ -225,16 +231,11 @@ fn control_event_id(event_type: &str, offset: &CdcOffset) -> String {
     format!("{event_type}:{}:{}", offset.file(), offset.position())
 }
 
-fn stable_event_id(
-    transaction_id: &str,
-    offset: &CdcOffset,
-    event_index: u64,
-    row_index: u64,
-) -> String {
+fn stable_event_id_prefix(transaction_id: &str, offset: &CdcOffset, event_index: u64) -> String {
     match offset {
-        CdcOffset::Gtid { .. } => format!("{transaction_id}:{event_index}:{row_index}"),
+        CdcOffset::Gtid { .. } => format!("{transaction_id}:{event_index}:"),
         CdcOffset::Position { file, position } => {
-            format!("{file}:{position}:{event_index}:{row_index}")
+            format!("{file}:{position}:{event_index}:")
         }
     }
 }
@@ -245,19 +246,17 @@ fn protocol_error(message: impl Into<String>) -> ReplicationError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
-    use crate::envelope::{CdcOperation, CdcValue};
+    use crate::envelope::{CdcOperation, CdcRow, CdcValue};
 
     fn row(database: &str, table: &str, id: u64) -> RowChange {
-        let mut after = BTreeMap::new();
+        let mut after = CdcRow::new();
         after.insert("id".to_owned(), CdcValue::Unsigned(id));
         RowChange {
-            database: database.to_owned(),
-            table: table.to_owned(),
+            database: Arc::from(database),
+            table: Arc::from(table),
             operation: CdcOperation::Insert,
-            key: BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(id))]),
+            key: CdcRow::from([("id".to_owned(), CdcValue::Unsigned(id))]),
             before: None,
             after: Some(after),
         }
@@ -312,7 +311,14 @@ mod tests {
         let CdcMessage::Row(envelope) = &messages[0] else {
             panic!("expected row envelope");
         };
-        assert_eq!(envelope.event_id, "mysql-bin.000003:456:0:0");
+        assert_eq!(envelope.event_id.to_string(), "mysql-bin.000003:456:0:0");
+        let serialized = serde_json::to_value(&messages[0]).map_err(|error| {
+            ReplicationError::new(ReplicationErrorKind::Decode, false, error.to_string())
+        })?;
+        assert_eq!(
+            serialized["event_id"],
+            serde_json::Value::String("mysql-bin.000003:456:0:0".to_owned())
+        );
         Ok(())
     }
 
@@ -330,12 +336,12 @@ mod tests {
     #[test]
     fn update_requires_full_before_and_after_images() {
         let change = RowChange {
-            database: "sales".to_owned(),
-            table: "orders".to_owned(),
+            database: Arc::from("sales"),
+            table: Arc::from("orders"),
             operation: CdcOperation::Update,
-            key: BTreeMap::new(),
+            key: CdcRow::new(),
             before: None,
-            after: Some(BTreeMap::new()),
+            after: Some(CdcRow::new()),
         };
         let result = TransactionAssembler::default().push(RawReplicationEvent::Row {
             timestamp_seconds: 123,
@@ -376,8 +382,8 @@ mod tests {
         let CdcMessage::Row(second) = &messages[1] else {
             panic!("expected second row");
         };
-        assert_eq!(first.change.table, "orders");
-        assert_eq!(second.change.table, "items");
+        assert_eq!(first.change.table.as_ref(), "orders");
+        assert_eq!(second.change.table.as_ref(), "items");
         assert_eq!(first.transaction_event_index, 0);
         assert_eq!(second.row_index, 1);
         let commit = assembler.push(RawReplicationEvent::Commit {

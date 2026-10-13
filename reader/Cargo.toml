@@ -13,13 +13,16 @@ relus_connector_rdbms = { workspace = true }
 
 clap = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 tracing-subscriber = { workspace = true }
 dashmap = "5"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 sqlx = { workspace = true }
 futures = { workspace = true }
 num-bigint = "0.4"
@@ -31,13 +34,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 inventory = { workspace = true }
-mysql_cdc = { workspace = true }
+mysql_async = { workspace = true }
+uuid = { workspace = true }
 redb = "2"
-
-# mysql_cdc depends on OpenSSL unconditionally. On Windows MSVC, build it from
-# source so CI does not depend on a particular preinstalled OpenSSL layout.
-[target.'cfg(target_env = "msvc")'.dependencies]
-openssl = { workspace = true }
+sha2 = "0.10"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

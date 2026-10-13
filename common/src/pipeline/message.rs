@@ -1,11 +1,17 @@
 //! Pipeline 消息与批次类型
 
-use crate::types::{MappingRow, UnifiedValue};
+use crate::{
+    cdc::{BufferedCdcRow, CdcCommitAcknowledger, CdcSnapshotTable},
+    types::{MappingRow, UnifiedValue},
+};
 
 /// Reader 到 Writer 的消息
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum PipelineMessage {
     DataBatch(Vec<MappingRow>),
+    CdcRow(BufferedCdcRow),
+    CdcSnapshotTable(CdcSnapshotTable),
+    CdcCommit(CdcCommitAcknowledger),
     ReaderFinished,
     Error(String),
 }

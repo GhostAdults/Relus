@@ -27,6 +27,7 @@ fn config(tls: TlsMode) -> MySqlConnectionConfig {
             position: 4,
         },
         tls,
+        protocol_compression: false,
     }
 }
 
@@ -36,24 +37,35 @@ fn disabled_tls_needs_no_certificate_paths() {
 }
 
 #[test]
-fn required_tls_rejects_empty_ca_or_server_identity() {
-    let missing_ca = config(TlsMode::Required {
-        ca_path: PathBuf::new(),
+fn encrypted_tls_is_explicitly_identity_unverified() {
+    assert!(config(TlsMode::Encrypted).validate().is_ok());
+    assert!(format!("{:?}", TlsMode::Encrypted).contains("identity-unverified"));
+}
+
+#[test]
+fn required_tls_allows_built_in_roots_and_rejects_invalid_inputs() {
+    let built_in_roots = config(TlsMode::Required {
+        ca_path: None,
+        server_name: "mysql.internal".to_owned(),
+    });
+    let empty_ca = config(TlsMode::Required {
+        ca_path: Some(PathBuf::new()),
         server_name: "mysql.internal".to_owned(),
     });
     let missing_server_name = config(TlsMode::Required {
-        ca_path: PathBuf::from("custom-ca.pem"),
+        ca_path: Some(PathBuf::from("custom-ca.pem")),
         server_name: String::new(),
     });
 
-    assert!(missing_ca.validate().is_err());
+    assert!(built_in_roots.validate().is_ok());
+    assert!(empty_ca.validate().is_err());
     assert!(missing_server_name.validate().is_err());
 }
 
 #[test]
 fn mutual_tls_requires_all_identity_paths() {
     let missing_key = config(TlsMode::Mutual {
-        ca_path: PathBuf::from("custom-ca.pem"),
+        ca_path: Some(PathBuf::from("custom-ca.pem")),
         server_name: "mysql.internal".to_owned(),
         client_cert_path: PathBuf::from("client-cert.pem"),
         client_key_path: PathBuf::new(),
@@ -65,7 +77,7 @@ fn mutual_tls_requires_all_identity_paths() {
 #[test]
 fn debug_output_redacts_secrets_and_certificate_paths() {
     let config = config(TlsMode::Mutual {
-        ca_path: PathBuf::from("sensitive-ca.pem"),
+        ca_path: Some(PathBuf::from("sensitive-ca.pem")),
         server_name: "mysql.internal".to_owned(),
         client_cert_path: PathBuf::from("sensitive-client-cert.pem"),
         client_key_path: PathBuf::from("sensitive-client-key.pem"),

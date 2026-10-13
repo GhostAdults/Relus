@@ -1,0 +1,42 @@
+[package]
+name = "relus-mysql-cdc-live-benchmark"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93.0"
+publish = false
+
+[features]
+baseline = ["dep:mysql_cdc", "dep:openssl"]
+candidate = ["dep:relus-mysql-cdc-candidate", "dep:tokio"]
+
+[dependencies]
+mysql_cdc = { version = "=0.2.1", optional = true }
+relus-mysql-cdc-candidate = { path = "../mysql-cdc-candidate", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"], optional = true }
+
+[target.'cfg(target_env = "msvc")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+[[bin]]
+name = "baseline"
+path = "src/bin/baseline.rs"
+required-features = ["baseline"]
+
+[[bin]]
+name = "candidate"
+path = "src/bin/candidate.rs"
+required-features = ["candidate"]
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"

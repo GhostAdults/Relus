@@ -69,9 +69,14 @@ pub struct BoundedEventSender {
 
 #[derive(Debug)]
 pub struct BufferedMessage {
-    pub message: CdcMessage,
-    pub estimated_bytes: usize,
+    pub serialized: Vec<u8>,
     _byte_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl BufferedMessage {
+    pub fn serialized_bytes(&self) -> usize {
+        self.serialized.len()
+    }
 }
 
 impl BoundedEventBuffer {
@@ -112,7 +117,7 @@ impl BoundedEventBuffer {
         metrics.current_events = metrics.current_events.saturating_sub(1);
         metrics.current_bytes = metrics
             .current_bytes
-            .saturating_sub(message.estimated_bytes);
+            .saturating_sub(message.serialized_bytes());
         metrics.popped_events += 1;
         Some(message)
     }
@@ -143,13 +148,14 @@ impl BoundedEventBuffer {
 
 impl BoundedEventSender {
     pub async fn push(&self, message: CdcMessage) -> Result<(), ReplicationError> {
-        let estimated_bytes = estimate_message_bytes(&message)?;
-        if estimated_bytes > self.limits.max_bytes {
+        let serialized = serialize_message(&message)?;
+        let serialized_bytes = serialized.len();
+        if serialized_bytes > self.limits.max_bytes {
             return Err(ReplicationError::new(
                 ReplicationErrorKind::Configuration,
                 false,
                 format!(
-                    "CDC message estimate ({estimated_bytes} bytes) exceeds the configured byte limit"
+                    "CDC serialized message ({serialized_bytes} bytes) exceeds the configured byte limit"
                 ),
             ));
         }
@@ -157,26 +163,25 @@ impl BoundedEventSender {
         let byte_permit = match self
             .byte_capacity
             .clone()
-            .try_acquire_many_owned(estimated_bytes as u32)
+            .try_acquire_many_owned(serialized_bytes as u32)
         {
             Ok(permit) => permit,
             Err(_) => {
                 self.mark_blocked();
                 self.byte_capacity
                     .clone()
-                    .acquire_many_owned(estimated_bytes as u32)
+                    .acquire_many_owned(serialized_bytes as u32)
                     .await
                     .map_err(|_| closed_error())?
             }
         };
         let buffered = BufferedMessage {
-            message,
-            estimated_bytes,
+            serialized,
             _byte_permit: byte_permit,
         };
         match self.sender.try_send(buffered) {
             Ok(()) => {
-                self.mark_pushed(estimated_bytes);
+                self.mark_pushed(serialized_bytes);
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(buffered)) => {
@@ -185,7 +190,7 @@ impl BoundedEventSender {
                     .send(buffered)
                     .await
                     .map_err(|_| closed_error())?;
-                self.mark_pushed(estimated_bytes);
+                self.mark_pushed(serialized_bytes);
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(closed_error()),
@@ -214,11 +219,15 @@ impl BoundedEventSender {
 }
 
 pub fn estimate_message_bytes(message: &CdcMessage) -> Result<usize, ReplicationError> {
-    serde_json::to_vec(message)
-        .map(|bytes| bytes.len())
-        .map_err(|error| {
-            ReplicationError::new(ReplicationErrorKind::Decode, false, error.to_string())
-        })
+    serialize_message(message).map(|bytes| bytes.len())
+}
+
+pub fn serialize_message(message: &CdcMessage) -> Result<Vec<u8>, ReplicationError> {
+    let mut serialized = Vec::with_capacity(768);
+    serde_json::to_writer(&mut serialized, message).map_err(|error| {
+        ReplicationError::new(ReplicationErrorKind::Decode, false, error.to_string())
+    })?;
+    Ok(serialized)
 }
 
 fn closed_error() -> ReplicationError {

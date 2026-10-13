@@ -15,11 +15,12 @@ pub use adapter::{
     MySqlConnectionConfig, MySqlReplicationClient, TlsMode,
 };
 pub use buffer::{
-    estimate_message_bytes, BoundedEventBuffer, BoundedEventSender, BufferLimits, BufferMetrics,
-    BufferedMessage,
+    estimate_message_bytes, serialize_message, BoundedEventBuffer, BoundedEventSender,
+    BufferLimits, BufferMetrics, BufferedMessage,
 };
 pub use envelope::{
-    CdcEnvelope, CdcMessage, CdcOffset, CdcOperation, CdcValue, RowChange, TransactionCommit,
+    CdcEnvelope, CdcEventId, CdcMessage, CdcOffset, CdcOperation, CdcRow, CdcValue, RowChange,
+    TransactionCommit,
 };
 pub use error::{ReplicationError, ReplicationErrorKind};
 pub use performance::{

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -213,19 +213,19 @@ where
         let event_id = snapshot_event_id(&database, &source_table, &row.key)?;
         sink.write_snapshot(&CdcEnvelope {
             schema_version: CDC_SCHEMA_VERSION,
-            event_id,
-            transaction_id: format!("snapshot:{database}:{source_table}"),
+            event_id: event_id.into(),
+            transaction_id: format!("snapshot:{database}:{source_table}").into(),
             transaction_event_index: row_count,
             row_index: 0,
             event_timestamp_seconds: 0,
-            offset: captured_offset.clone(),
+            offset: Arc::new(captured_offset.clone()),
             change: RowChange {
-                database: database.clone(),
-                table: source_table.clone(),
+                database: Arc::from(database.as_str()),
+                table: Arc::from(source_table.as_str()),
                 operation: CdcOperation::Snapshot,
-                key: row.key,
+                key: row.key.into(),
                 before: None,
-                after: Some(row.values),
+                after: Some(row.values.into()),
             },
         })
         .await?;

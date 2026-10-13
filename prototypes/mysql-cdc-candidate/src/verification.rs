@@ -5,13 +5,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     adapter::{consume_until_cancelled, verify_authentication_plugin, verify_connection},
-    CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig, MySqlReplicationClient,
-    ReplicationErrorKind, TlsMode,
+    CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig, ReplicationErrorKind, TlsMode,
 };
 
 const MYSQL_VERSIONS: [&str; 4] = ["56", "57", "80", "84"];
-const PROFILE_CASE_SUFFIXES: [&str; 8] = [
-    "tls_disabled",
+const PROFILE_CASE_SUFFIXES: [&str; 10] = [
+    "plaintext_policy",
+    "tls_encrypted",
     "tls_required",
     "tls_wrong_server_identity",
     "tls_wrong_ca",
@@ -19,6 +19,7 @@ const PROFILE_CASE_SUFFIXES: [&str; 8] = [
     "auth.mysql_native_password",
     "auth.caching_sha2_password",
     "cancellation",
+    "gtid",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,12 +77,12 @@ pub async fn verify_available_runtime() -> VerificationReport {
 async fn verify_runtime_with_environment(
     environment: &BTreeMap<String, String>,
 ) -> VerificationReport {
-    let certificates = CertificatePaths::from_environment(environment);
     let mut cases = Vec::new();
 
     for version in MYSQL_VERSIONS {
         match RuntimeProfile::from_environment(version, environment) {
             Ok(Some(profile)) => {
+                let certificates = CertificatePaths::from_environment(version, environment);
                 verify_profile(&profile, &certificates, environment, &mut cases).await;
             }
             Ok(None) => append_unavailable_profile(version, &mut cases),
@@ -148,50 +149,54 @@ impl RuntimeProfile {
                 position: 4,
             },
             tls,
+            protocol_compression: false,
         }
     }
 
     fn default_config(&self, tls: TlsMode) -> MySqlConnectionConfig {
         self.connection_config(self.username.clone(), self.password.clone(), tls)
     }
+
+    fn capability_tls(&self) -> Option<TlsMode> {
+        if self.version == "56" {
+            Some(TlsMode::Disabled)
+        } else {
+            Some(TlsMode::Encrypted)
+        }
+    }
 }
 
 impl CertificatePaths {
-    fn from_environment(environment: &BTreeMap<String, String>) -> Self {
+    fn from_environment(version: &str, environment: &BTreeMap<String, String>) -> Self {
+        let prefix = format!("RELUS_TEST_MYSQL{version}_");
         Self {
             ca: environment
-                .get("RELUS_TEST_MYSQL_CA_PATH")
+                .get(&format!("{prefix}CA_PATH"))
                 .map(PathBuf::from),
             client_cert: environment
-                .get("RELUS_TEST_MYSQL_CLIENT_CERT_PATH")
+                .get(&format!("{prefix}CLIENT_CERT_PATH"))
                 .map(PathBuf::from),
             client_key: environment
-                .get("RELUS_TEST_MYSQL_CLIENT_KEY_PATH")
+                .get(&format!("{prefix}CLIENT_KEY_PATH"))
                 .map(PathBuf::from),
-            server_name: environment.get("RELUS_TEST_MYSQL_SERVER_NAME").cloned(),
+            server_name: environment.get(&format!("{prefix}SERVER_NAME")).cloned(),
         }
     }
 
     fn required_tls(&self) -> Option<TlsMode> {
         Some(TlsMode::Required {
-            ca_path: self.ca.clone()?,
+            ca_path: Some(self.ca.clone()?),
             server_name: self.server_name.clone()?,
         })
     }
 
     fn mutual_tls(&self) -> Option<TlsMode> {
         Some(TlsMode::Mutual {
-            ca_path: self.ca.clone()?,
+            ca_path: Some(self.ca.clone()?),
             server_name: self.server_name.clone()?,
             client_cert_path: self.client_cert.clone()?,
             client_key_path: self.client_key.clone()?,
         })
-    }
-
-    fn strongest_tls(&self) -> TlsMode {
-        self.mutual_tls()
-            .or_else(|| self.required_tls())
-            .unwrap_or(TlsMode::Disabled)
     }
 }
 
@@ -201,10 +206,15 @@ async fn verify_profile(
     environment: &BTreeMap<String, String>,
     cases: &mut Vec<VerificationCase>,
 ) {
-    cases.push(connection_case(
-        format!("mysql{}.tls_disabled", profile.version),
+    cases.push(plaintext_policy_case(
+        format!("mysql{}.plaintext_policy", profile.version),
         verify_connection(&profile.default_config(TlsMode::Disabled)).await,
-        "plaintext connection authenticated",
+    ));
+
+    cases.push(connection_case(
+        format!("mysql{}.tls_encrypted", profile.version),
+        verify_connection(&profile.default_config(TlsMode::Encrypted)).await,
+        "the connection was encrypted without server identity verification",
     ));
 
     if let Some(required_tls) = certificates.required_tls() {
@@ -230,7 +240,7 @@ async fn verify_profile(
             (&certificates.client_cert, &certificates.server_name)
         {
             let wrong_ca = TlsMode::Required {
-                ca_path: client_cert.clone(),
+                ca_path: Some(client_cert.clone()),
                 server_name: server_name.clone(),
             };
             cases.push(expected_tls_failure_case(
@@ -247,7 +257,7 @@ async fn verify_profile(
         for suffix in ["tls_required", "tls_wrong_server_identity", "tls_wrong_ca"] {
             cases.push(not_run(
                 format!("mysql{}.{suffix}", profile.version),
-                "the approved CA path and server name are unavailable",
+                "the custom CA path and TLS server name are unavailable",
             ));
         }
     }
@@ -261,7 +271,7 @@ async fn verify_profile(
     } else {
         cases.push(not_run(
             format!("mysql{}.mutual_tls", profile.version),
-            "the approved CA, server name, client certificate, and client key paths are incomplete",
+            "the custom CA, server name, client certificate, and client key paths are incomplete",
         ));
     }
 
@@ -275,14 +285,22 @@ async fn verify_profile(
             environment.get(&format!("{prefix}_PASSWORD")),
         ) {
             (Some(username), Some(password)) => {
-                let config = profile.connection_config(
-                    username.clone(),
-                    password.clone(),
-                    certificates.strongest_tls(),
-                );
+                let Some(capability_tls) = profile.capability_tls() else {
+                    cases.push(not_run(
+                        format!("mysql{}.auth.{label}", profile.version),
+                        "a verified transport for authentication is unavailable",
+                    ));
+                    continue;
+                };
+                let config =
+                    profile.connection_config(username.clone(), password.clone(), capability_tls);
                 cases.push(connection_case(
                     format!("mysql{}.auth.{label}", profile.version),
-                    verify_authentication_plugin(&config, label).await,
+                    verify_authentication_plugin(
+                        &config,
+                        label,
+                    )
+                    .await,
                     "the supplied account connected and its server definition confirmed the expected authentication plugin",
                 ));
             }
@@ -297,12 +315,12 @@ async fn verify_profile(
         }
     }
 
-    cases.push(verify_cancellation(profile, certificates, environment).await);
+    cases.push(verify_cancellation(profile, environment).await);
+    cases.push(verify_gtid(profile, environment).await);
 }
 
 async fn verify_cancellation(
     profile: &RuntimeProfile,
-    certificates: &CertificatePaths,
     environment: &BTreeMap<String, String>,
 ) -> VerificationCase {
     let prefix = format!("RELUS_TEST_MYSQL{}", profile.version);
@@ -331,7 +349,13 @@ async fn verify_cancellation(
         );
     };
 
-    let mut config = profile.default_config(certificates.strongest_tls());
+    let Some(capability_tls) = profile.capability_tls() else {
+        return not_run(
+            format!("mysql{}.cancellation", profile.version),
+            "a verified transport for replication is unavailable",
+        );
+    };
+    let mut config = profile.default_config(capability_tls);
     config.server_id = server_id;
     config.start_offset = CdcOffset::Position {
         file: file.clone(),
@@ -370,6 +394,58 @@ async fn verify_cancellation(
     }
 }
 
+async fn verify_gtid(
+    profile: &RuntimeProfile,
+    environment: &BTreeMap<String, String>,
+) -> VerificationCase {
+    let prefix = format!("RELUS_TEST_MYSQL{}_", profile.version);
+    let Some(resume_set) = environment.get(&format!("{prefix}GTID_SET")) else {
+        return not_run(
+            format!("mysql{}.gtid", profile.version),
+            "the GTID resume set and server ID are unavailable",
+        );
+    };
+    let Some(server_id) = environment
+        .get(&format!("{prefix}SERVER_ID"))
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return not_run(
+            format!("mysql{}.gtid", profile.version),
+            "the GTID resume set and server ID are unavailable",
+        );
+    };
+
+    let mut config = profile.default_config(profile.capability_tls().unwrap_or(TlsMode::Disabled));
+    config.server_id = server_id;
+    config.start_offset = CdcOffset::Gtid {
+        resume_set: resume_set.clone(),
+        transaction_gtid: None,
+        file: String::new(),
+        position: 4,
+    };
+    let mut client = MySqlAsyncReplicationClient::new(config);
+    match client.connect().await {
+        Ok(()) => match client.close().await {
+            Ok(()) => passed(
+                format!("mysql{}.gtid", profile.version),
+                "the GTID replication request connected and closed successfully",
+            ),
+            Err(_) => failed(
+                format!("mysql{}.gtid", profile.version),
+                "the GTID replication connection did not close cleanly",
+            ),
+        },
+        Err(error) => case(
+            format!("mysql{}.gtid", profile.version),
+            VerificationStatus::Failed,
+            &format!(
+                "the GTID replication connection failed with {:?}",
+                error.kind
+            ),
+        ),
+    }
+}
+
 fn connection_case(
     name: String,
     result: Result<(), crate::ReplicationError>,
@@ -377,7 +453,29 @@ fn connection_case(
 ) -> VerificationCase {
     match result {
         Ok(()) => passed(name, success_detail),
-        Err(_) => failed(name, "the connection attempt failed"),
+        Err(error) => case(
+            name,
+            VerificationStatus::Failed,
+            &format!("the connection attempt failed with {:?}", error.kind),
+        ),
+    }
+}
+
+fn plaintext_policy_case(
+    name: String,
+    result: Result<(), crate::ReplicationError>,
+) -> VerificationCase {
+    match result {
+        Ok(()) => passed(name, "plaintext connection authenticated"),
+        Err(error) if error.kind == ReplicationErrorKind::Tls => passed(
+            name,
+            "the server required secure transport and plaintext was not used as a fallback",
+        ),
+        Err(error) => case(
+            name,
+            VerificationStatus::Failed,
+            &format!("the plaintext policy check failed with {:?}", error.kind),
+        ),
     }
 }
 
@@ -450,7 +548,7 @@ mod tests {
     async fn absent_environments_are_reported_as_not_run() {
         let report = verify_runtime_with_environment(&BTreeMap::new()).await;
 
-        assert_eq!(report.cases.len(), 32);
+        assert_eq!(report.cases.len(), 40);
         assert!(report
             .cases
             .iter()
@@ -469,9 +567,49 @@ mod tests {
             .filter(|case| case.name.starts_with("mysql80."))
             .collect::<Vec<_>>();
 
-        assert_eq!(mysql80.len(), 8);
+        assert_eq!(mysql80.len(), 10);
         assert!(mysql80
             .iter()
             .all(|case| case.status == VerificationStatus::Failed));
+    }
+
+    #[test]
+    fn certificate_paths_are_scoped_to_one_version() {
+        let environment = BTreeMap::from([
+            (
+                "RELUS_TEST_MYSQL56_CA_PATH".to_owned(),
+                "mysql56-ca.pem".to_owned(),
+            ),
+            (
+                "RELUS_TEST_MYSQL56_SERVER_NAME".to_owned(),
+                "mysql56.local".to_owned(),
+            ),
+            (
+                "RELUS_TEST_MYSQL_CA_PATH".to_owned(),
+                "legacy-global-ca.pem".to_owned(),
+            ),
+        ]);
+
+        let mysql56 = CertificatePaths::from_environment("56", &environment);
+        let mysql80 = CertificatePaths::from_environment("80", &environment);
+
+        assert_eq!(mysql56.ca, Some(PathBuf::from("mysql56-ca.pem")));
+        assert_eq!(mysql56.server_name.as_deref(), Some("mysql56.local"));
+        assert_eq!(mysql80.ca, None);
+        assert_eq!(mysql80.server_name, None);
+    }
+
+    #[test]
+    fn plaintext_policy_accepts_an_explicit_secure_transport_rejection() {
+        let case = plaintext_policy_case(
+            "mysql80.plaintext_policy".to_owned(),
+            Err(crate::ReplicationError::new(
+                ReplicationErrorKind::Tls,
+                false,
+                "secure transport required",
+            )),
+        );
+
+        assert_eq!(case.status, VerificationStatus::Passed);
     }
 }

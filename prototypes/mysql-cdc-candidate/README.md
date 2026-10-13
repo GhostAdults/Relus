@@ -1,6 +1,6 @@
 # Relus MySQL CDC candidate prototype
 
-Independent prototype for GitHub issues #29 through #33. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
+Independent prototype for GitHub issues #29 through #34 and the approved production-migration gate closure. It is deliberately excluded from the root workspace by its own `[workspace]` declaration and does not replace `reader/src/binlog_reader.rs`.
 
 Selected dependency:
 
@@ -10,7 +10,7 @@ mysql_async = { version = "=0.37.1", default-features = false, features = [
 ] }
 ```
 
-The public boundary is Relus-owned: `MySqlReplicationClient`, `RawReplicationEvent`, `CdcOffset`, `CdcMessage`, and `CdcEnvelope`. Third-party event and connection types stay in `src/adapter.rs`. Row messages include a primary-key map when MySQL's table-map metadata identifies primary-key columns.
+The public boundary is Relus-owned: `MySqlReplicationClient`, `RawReplicationEvent`, `CdcOffset`, `CdcMessage`, and `CdcEnvelope`. Third-party event and connection types stay in `src/adapter.rs`. At connection time the adapter discovers column names, ordinals, primary keys, and integer signedness from `information_schema.columns`; users do not provide a schema map. TABLE_MAP identifies the database/table and row values are mapped through that discovered schema. Missing metadata or a changed column count fails closed as `SchemaDrift`.
 
 ## Local checks
 
@@ -29,25 +29,29 @@ as passes. The final two commands must report that no matching package exists.
 
 ## Secure connection and shutdown verification
 
-`MySqlConnectionConfig` exposes only three TLS modes:
+`MySqlConnectionConfig` exposes four TLS modes:
 
 - `disabled`
-- `required` with a custom CA path and verified server name
+- `encrypted` for compatibility-only encryption without server identity verification
+- `required` with a verified server name and an optional custom CA path
 - `mutual` with the required-TLS fields plus client certificate and private-key paths
 
-The adapter disables built-in roots whenever a custom CA is selected. It does not expose
-invalid-certificate or identity-validation bypasses. The prototype only passes the configured
-paths to `mysql_async`; Relus code does not open, copy, modify, print, or parse certificate
-contents. Passwords and certificate paths are redacted from `Debug` output.
+Without a custom CA, the adapter uses `mysql_async`'s built-in WebPKI roots. It disables those
+built-in roots whenever a custom CA is selected. It does not expose
+invalid-certificate or identity-validation bypasses in `required` or `mutual` mode. The explicit
+`encrypted` mode is an exception for compatibility testing only and is never a production gate.
+The prototype only passes the configured paths to `mysql_async`; Relus code does not open, copy,
+modify, print, or parse certificate contents. Passwords and certificate paths are redacted from
+`Debug` output.
 
 Version connection profiles continue to use `RELUS_TEST_MYSQL{56,57,80,84}_{HOST,PORT,USERNAME,PASSWORD,DATABASE}`.
 The following optional variables enable the issue #30 cases:
 
 ```text
-RELUS_TEST_MYSQL_CA_PATH
-RELUS_TEST_MYSQL_CLIENT_CERT_PATH
-RELUS_TEST_MYSQL_CLIENT_KEY_PATH
-RELUS_TEST_MYSQL_SERVER_NAME
+RELUS_TEST_MYSQL{56,57,80,84}_CA_PATH
+RELUS_TEST_MYSQL{56,57,80,84}_CLIENT_CERT_PATH
+RELUS_TEST_MYSQL{56,57,80,84}_CLIENT_KEY_PATH
+RELUS_TEST_MYSQL{56,57,80,84}_SERVER_NAME
 
 RELUS_TEST_MYSQL80_NATIVE_USERNAME
 RELUS_TEST_MYSQL80_NATIVE_PASSWORD
@@ -57,18 +61,36 @@ RELUS_TEST_MYSQL80_CACHING_SHA2_PASSWORD
 RELUS_TEST_MYSQL80_BINLOG_FILE
 RELUS_TEST_MYSQL80_BINLOG_POSITION
 RELUS_TEST_MYSQL80_SERVER_ID
+RELUS_TEST_MYSQL80_GTID_SET
 ```
 
+TLS inputs are isolated per MySQL profile; the harness does not fall back to legacy global
+certificate variables. `CA_PATH` is optional. Omitting it uses built-in WebPKI roots but never
+disables certificate or server-name verification. A private or self-signed server chain still
+requires an appropriate custom CA path.
+
 Authentication and replication variables use the same suffixes for the other version profiles.
-Authentication checks run `SHOW CREATE USER CURRENT_USER()` after connecting and confirm the
-account's server-side definition names the expected plugin; the returned definition is never
-printed or included in errors. This avoids treating a mislabeled account as plugin evidence.
+Authentication checks use `SHOW CREATE USER CURRENT_USER()` on MySQL 5.7 and later. MySQL 5.6
+uses a read-only `mysql.user.plugin` lookup because it does not support that statement. Both paths
+confirm the server-side plugin, and the returned definition is never printed or included in
+errors. This avoids treating a mislabeled account as plugin evidence.
 The wrong-CA case requires a second approved certificate path; the harness uses the supplied
 client-certificate path as that distinct trust root and reports `not_run` when no such approved
 path exists.
 The cancellation check races a pending replication read against a cancellation token, drops the
 read future, and closes the owned replication connection within a bounded timeout. It starts no
 blocking worker thread.
+
+`MySqlConnectionConfig::protocol_compression` explicitly controls MySQL protocol compression.
+When enabled, the adapter requests the driver's fast compression level. The uncompressed path
+remains available. The live same-coordinate A/B benchmark measured a 10.83% median improvement
+from compression on the local MySQL 5.6 workload. The optional streaming binary enables it when
+`RELUS_TEST_MYSQL80_COMPRESSION` is present.
+
+The `tls_encrypted` and `gtid` verification cases use the versioned replication profile. The
+encrypted case deliberately does not verify the server identity and is compatibility evidence
+only; it is not a production-migration gate. The GTID case requires a current versioned
+`GTID_SET` and only proves that a GTID replication request can connect and close.
 
 ## Recovery and at-least-once crash proof
 
@@ -128,9 +150,10 @@ Date: 2026-09-26
 
 The prototype now contains deterministic seams for the boundedness and data-fidelity gates:
 
-- `BoundedEventBuffer` limits both queued event count and estimated serialized bytes. A slow
-  consumer makes the producer await capacity, oversized messages fail before enqueue, and metrics
-  expose current and peak event/byte usage.
+- `BoundedEventBuffer` serializes each message once, limits both queued event count and actual
+  serialized bytes, and exposes those same bytes to the Sink. A slow consumer makes the producer
+  await capacity, oversized messages fail before enqueue, and metrics expose current and peak
+  event/byte usage.
 - The transaction assembler emits row messages incrementally, retains only transaction counters,
   preserves cross-table row order, and emits the checkpoint-eligible boundary only at COMMIT.
 - `CdcValue` uses an unambiguous externally tagged representation so signed/unsigned integers,
@@ -142,13 +165,16 @@ The prototype now contains deterministic seams for the boundedness and data-fide
   applies the required 80 percent gate.
 
 The deterministic evidence is in `tests/bounded.rs`, `tests/data_fidelity.rs`,
-`tests/performance.rs`, and the transaction unit tests. A live comparison against the current
-`mysql_cdc` reader, sustained MySQL load, and process-level memory sampling are still `not_run`
-because no versioned MySQL test environment or baseline run was available in this execution.
+`tests/performance.rs`, and the transaction unit tests. The 2026-10-10 live comparison is recorded
+in `docs/research/mysql-cdc-performance-evaluation.md`. Memory boundedness and a 500,000-row
+transaction passed. After compact-row, shared-metadata, in-place decode, event-level column
+ordering, scalar fast-path, event-ID-prefix, serialization-capacity, and protocol-compression
+optimizations, candidate median throughput reached 101.59% of the current Reader baseline and
+passed the required 80% gate.
 
 | Issue #33 evidence item | Result |
 | --- | --- |
-| Event and estimated-byte limits apply producer backpressure | `passed` |
+| Event and actual serialized-byte limits apply producer backpressure | `passed` |
 | Buffer metrics stay within configured limits under slow consumption | `passed` |
 | Large transactions stream rows and checkpoint only at COMMIT | `passed` |
 | Multi-table transaction order is preserved | `passed` |
@@ -156,5 +182,18 @@ because no versioned MySQL test environment or baseline run was available in thi
 | Unsupported spatial types fail validation | `passed` |
 | Schema changes stop safely without checkpoint advancement | `passed` |
 | 80 percent performance gate logic | `passed` |
-| Current `mysql_cdc` baseline in the same environment | `not_run` |
-| Sustained live throughput, memory, and MySQL load gate | `not_run` |
+| Current `mysql_cdc` baseline in the same environment | `passed` |
+| Sustained live throughput gate | `passed` (101.59%; minimum 80%) |
+| Live 1M/2M-row memory boundedness | `passed` |
+| Live 500,000-row transaction resource check | `passed` |
+
+## 2026-10-12 live DML and recovery closure
+
+The in-scope MySQL 5.6 and 8.0 environments both passed real INSERT, UPDATE, and DELETE capture,
+named-column and primary-key mapping, unsigned integer fidelity, common temporal/binary/text/null
+values, confirmed file/position restart, unconfirmed replay, and confirmed GTID restart. GTID dump
+requests rely on the GTID set without incorrectly starting in the middle of a binlog file, while a
+file/position startup remains a file/position checkpoint throughout recovery.
+
+The final evaluation classifies the candidate as `recommended_for_production_migration`. The
+prototype remains isolated until the separately executed production Reader migration begins.

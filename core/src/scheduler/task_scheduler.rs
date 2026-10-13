@@ -593,6 +593,7 @@ mod tests {
         let source = DataSourceConfig {
             name: "source".to_string(),
             source_type: "api".to_string(),
+            config_version: None,
             is_table_mode: true,
             query_sql: None,
             writer_mode: None,
@@ -601,6 +602,7 @@ mod tests {
         let sink = DataSourceConfig {
             name: "target".to_string(),
             source_type: "api".to_string(),
+            config_version: None,
             is_table_mode: true,
             query_sql: None,
             writer_mode: None,
@@ -608,6 +610,7 @@ mod tests {
         };
 
         Arc::new(JobConfig {
+            execution: None,
             source,
             sink,
             column_mapping: BTreeMap::new(),

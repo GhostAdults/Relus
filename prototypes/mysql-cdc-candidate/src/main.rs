@@ -1,6 +1,5 @@
 use relus_mysql_cdc_candidate::{
-    CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig, MySqlReplicationClient, TlsMode,
-    TransactionAssembler,
+    CdcOffset, MySqlAsyncReplicationClient, MySqlConnectionConfig, TlsMode, TransactionAssembler,
 };
 
 #[tokio::main]
@@ -40,5 +39,6 @@ fn config_from_environment() -> Result<Option<MySqlConnectionConfig>, Box<dyn st
             position,
         },
         tls: TlsMode::Disabled,
+        protocol_compression: std::env::var_os("RELUS_TEST_MYSQL80_COMPRESSION").is_some(),
     }))
 }

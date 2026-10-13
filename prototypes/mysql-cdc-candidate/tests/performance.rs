@@ -1,31 +1,31 @@
 #![allow(clippy::expect_used)]
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use relus_mysql_cdc_candidate::{
     compare_to_baseline, estimate_message_bytes, measure_bounded_load, BufferLimits, CdcEnvelope,
-    CdcMessage, CdcOffset, CdcOperation, CdcValue, RowChange,
+    CdcMessage, CdcOffset, CdcOperation, CdcRow, CdcValue, RowChange,
 };
 
 fn message(index: u64) -> CdcMessage {
     CdcMessage::Row(CdcEnvelope {
         schema_version: 1,
-        event_id: format!("load-{index}"),
-        transaction_id: "load".to_owned(),
+        event_id: format!("load-{index}").into(),
+        transaction_id: Arc::from("load"),
         transaction_event_index: index,
         row_index: 0,
         event_timestamp_seconds: 1,
-        offset: CdcOffset::Position {
+        offset: Arc::new(CdcOffset::Position {
             file: "mysql-bin.000001".to_owned(),
             position: index,
-        },
+        }),
         change: RowChange {
-            database: "sales".to_owned(),
-            table: "orders".to_owned(),
+            database: Arc::from("sales"),
+            table: Arc::from("orders"),
             operation: CdcOperation::Insert,
-            key: BTreeMap::from([(String::from("id"), CdcValue::Unsigned(index))]),
+            key: CdcRow::from([(String::from("id"), CdcValue::Unsigned(index))]),
             before: None,
-            after: Some(BTreeMap::from([(
+            after: Some(CdcRow::from([(
                 String::from("id"),
                 CdcValue::Unsigned(index),
             )])),

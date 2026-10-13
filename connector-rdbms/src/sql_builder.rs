@@ -1186,6 +1186,7 @@ async fn query_unique_columns(pool: &RdbmsPool, table: &str) -> Result<Vec<Strin
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

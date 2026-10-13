@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::rdbms_writer_util::rdbms_writer::{
     PipelineRowWriter, RdbmsConfig, RdbmsJob, RdbmsWriter,
 };
-use crate::{DataWriterJob, DataWriterTask, SplitWriterResult, WriteTask};
+use crate::{DataWriterJob, DataWriterTask, SinkCapabilities, SplitWriterResult, WriteTask};
 use relus_common::constant::pipeline::DEFAULT_BATCH_SIZE;
 use relus_common::job_config::WriteMode;
 
@@ -76,6 +76,15 @@ impl DataWriterJob for DatabaseWriter {
     }
     fn description(&self) -> String {
         self.job.original_config.sink.name.to_string()
+    }
+
+    fn capabilities(&self) -> SinkCapabilities {
+        SinkCapabilities {
+            transactional_writes: false,
+            idempotent_snapshot: true,
+            idempotent_cdc: true,
+            supports_multi_table: true,
+        }
     }
 }
 

@@ -7,6 +7,8 @@ use crate::data_source_config::DataSourceConfig;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobConfig {
+    #[serde(default)]
+    pub execution: Option<ExecutionConfig>,
     #[serde(alias = "input")]
     pub source: DataSourceConfig,
     #[serde(alias = "target", alias = "output")]
@@ -30,6 +32,7 @@ pub enum JobConfigParseMode {
 }
 
 const JOB_FIELDS: &[&str] = &[
+    "execution",
     "source",
     "input",
     "sink",
@@ -46,12 +49,35 @@ const JOB_FIELDS: &[&str] = &[
 const DATA_SOURCE_FIELDS: &[&str] = &[
     "name",
     "type",
+    "config_version",
     "is_table_mode",
     "query_sql",
     "writer_mode",
     "config",
 ];
 const SCHEDULE_FIELDS: &[&str] = &["type", "value"];
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionConfig {
+    pub delivery_guarantee: DeliveryGuarantee,
+    pub checkpoint: ExecutionCheckpointConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryGuarantee {
+    AtLeastOnce,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCheckpointConfig {
+    pub enabled: bool,
+    pub interval: String,
+    pub timeout: String,
+    pub max_consecutive_failures: u32,
+}
 
 fn reject_unknown_fields(value: &serde_json::Value, path: &str, allowed: &[&str]) -> Result<()> {
     let Some(object) = value.as_object() else {
@@ -271,7 +297,8 @@ mod tests {
             ("input", "output"),
             ("source", "target"),
         ] {
-            let config = JobConfig::parse_value(job(source, sink)).unwrap();
+            let config = JobConfig::parse_value(job(source, sink))
+                .unwrap_or_else(|error| panic!("compatibility names should parse: {error}"));
             assert_eq!(config.source.name, "source");
             assert_eq!(config.sink.name, "sink");
         }
@@ -281,16 +308,19 @@ mod tests {
     fn compatible_mode_ignores_unknown_top_level_fields() {
         let mut value = job("source", "sink");
         value["future_option"] = json!(true);
-        JobConfig::parse_value(value).unwrap();
+        JobConfig::parse_value(value).unwrap_or_else(|error| {
+            panic!("compatible mode should ignore unknown fields: {error}")
+        });
     }
 
     #[test]
     fn strict_mode_rejects_unknown_top_level_fields() {
         let mut value = job("source", "sink");
         value["future_option"] = json!(true);
-        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
-            .unwrap_err()
-            .to_string();
+        let Err(error) = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict) else {
+            panic!("strict mode should reject an unknown top-level field");
+        };
+        let error = error.to_string();
         assert!(error.contains("config.parse.field"));
         assert!(error.contains("future_option"));
     }
@@ -299,9 +329,10 @@ mod tests {
     fn strict_mode_rejects_unknown_data_source_fields_with_path() {
         let mut value = job("source", "sink");
         value["source"]["future_option"] = json!(true);
-        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
-            .unwrap_err()
-            .to_string();
+        let Err(error) = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict) else {
+            panic!("strict mode should reject an unknown source field");
+        };
+        let error = error.to_string();
         assert!(error.contains("source"));
         assert!(error.contains("future_option"));
     }
@@ -310,25 +341,30 @@ mod tests {
     fn strict_mode_rejects_unknown_schedule_fields_with_path() {
         let mut value = job("source", "sink");
         value["schedule"] = json!({"type":"cron","value":"*/5 * * * *","typo":true});
-        let error = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict)
-            .unwrap_err()
-            .to_string();
+        let Err(error) = JobConfig::parse_value_with_mode(value, JobConfigParseMode::Strict) else {
+            panic!("strict mode should reject an unknown schedule field");
+        };
+        let error = error.to_string();
         assert!(error.contains("schedule.typo"));
     }
 
     #[test]
     fn reports_json_and_field_errors_separately() {
-        let error = JobConfig::parse_json("{").unwrap_err().to_string();
+        let Err(error) = JobConfig::parse_json("{") else {
+            panic!("invalid JSON should fail");
+        };
+        let error = error.to_string();
         assert!(error.contains("config.parse.json"));
         assert!(error.contains("line 1 column"));
 
-        let error = JobConfig::parse_value(json!({
+        let Err(error) = JobConfig::parse_value(json!({
             "source": {"name":"source","type":"api","config":{}},
             "sink": {"name":"sink","type":"database","config":{}},
             "column_mapping": []
-        }))
-        .unwrap_err()
-        .to_string();
+        })) else {
+            panic!("invalid field types should fail");
+        };
+        let error = error.to_string();
         assert!(error.contains("config.parse.field"));
         assert!(error.contains("column_mapping"));
     }
@@ -336,8 +372,14 @@ mod tests {
     #[test]
     fn missing_required_field_reports_field_error() {
         let mut value = job("source", "sink");
-        value.as_object_mut().unwrap().remove("sink");
-        let error = JobConfig::parse_value(value).unwrap_err().to_string();
+        let Some(object) = value.as_object_mut() else {
+            panic!("job fixture should be an object");
+        };
+        object.remove("sink");
+        let Err(error) = JobConfig::parse_value(value) else {
+            panic!("missing required sink should fail");
+        };
+        let error = error.to_string();
         assert!(error.contains("config.parse.field"));
         assert!(error.contains("sink"));
     }

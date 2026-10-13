@@ -301,6 +301,7 @@ fn api_value_error(status: StatusCode, error: String) -> (StatusCode, Json<ApiRe
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

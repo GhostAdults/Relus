@@ -16,7 +16,7 @@ mysql_async = { version = "=0.37.1", default-features = false, features = [
     "tls12",
     "binlog",
 ] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

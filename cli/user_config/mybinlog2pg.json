@@ -1,25 +1,74 @@
 {
-  "id": "binlog_sync",
+  "job_id": "mysql_cdc_to_postgres",
+  "execution": {
+    "delivery_guarantee": "at_least_once",
+    "checkpoint": {
+      "enabled": true,
+      "interval": "30s",
+      "timeout": "2m",
+      "max_consecutive_failures": 3
+    }
+  },
   "source": {
-    "name": "binlog_source",
-    "type": "mysql_binlog",
+    "name": "mysql_cdc_source",
+    "type": "mysql_cdc",
+    "config_version": 1,
     "config": {
+      "source_id": "mysql_local_sales",
       "connection": {
         "host": "127.0.0.1",
         "port": 3306,
         "database": "my_db",
-        "username": "root",
-        "password": "123456",
-        "server_id": 1,
-        "table": "user_x",
-        "table_filter": "my_db.user_x"
-      }
+        "username": "replication_user",
+        "password": {
+          "env": "RELUS_MYSQL_CDC_PASSWORD"
+        }
+      },
+      "replication": {
+        "server_id": 4101,
+        "protocol_compression": true
+      },
+      "tls": {
+        "mode": "disabled"
+      },
+      "startup": {
+        "mode": "initial"
+      },
+      "checkpoint": {
+        "id": "mysql_local_sales",
+        "path": "./checkpoints/mysql_local_sales.redb"
+      },
+      "retry": {
+        "initial_delay_ms": 500,
+        "max_delay_ms": 30000,
+        "max_attempts": null
+      },
+      "heartbeat": {
+        "interval_seconds": 10,
+        "timeout_seconds": 45
+      },
+      "buffer": {
+        "events": 1024,
+        "bytes": 16777216
+      },
+      "tables": [
+        {
+          "include": "user_x",
+          "target": "user_w",
+          "columns": {
+            "id": "id",
+            "userAccount": "userAccount",
+            "userPassword": "userPassword"
+          },
+          "initial_target_policy": "upsert"
+        }
+      ]
     }
   },
   "sink": {
-    "name": "db_target",
+    "name": "postgres_target",
     "type": "database",
-    "writer_mode": "insert",
+    "writer_mode": "upsert",
     "config": {
       "connection": {
         "type": "postgres",
@@ -27,28 +76,20 @@
         "port": 5432,
         "database": "postgres",
         "username": "postgres",
-        "password": "123456",
-        "table": "user_w",
+        "password": "",
+        "table": "unused_for_cdc",
         "key_columns": [
           "id"
         ],
         "max_connections": 20,
         "acquire_timeout_secs": 30,
-        "use_transaction": true
+        "use_transaction": false
       }
     }
   },
-  "column_mapping": {
-    "id": "id",
-    "userAccount": "expr: 'IMPORTED'",
-    "userPassword": "userPassword"
-  },
-  "column_types": {
-    "id": "int",
-    "userAccount": "string",
-    "userPassword": "string"
-  },
+  "column_mapping": {},
+  "column_types": null,
   "sync_mode": "incremental",
-  "batch_size": 1,
-  "channel_buffer_size": 12000
+  "batch_size": 100,
+  "channel_buffer_size": 1024
 }

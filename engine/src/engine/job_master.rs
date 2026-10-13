@@ -111,9 +111,9 @@ mod tests {
     use super::*;
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
-    use relus_common::{job_config::JobConfig, PipelineMessage};
+    use relus_common::{cdc::SinkRequirements, job_config::JobConfig, PipelineMessage};
     use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
-    use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult};
+    use relus_writer::{DataWriterJob, DataWriterTask, SinkCapabilities, SplitWriterResult};
     use serde_json::json;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -259,11 +259,14 @@ mod tests {
         split_count: Arc<AtomicUsize>,
         mode: StreamMode,
         fail_builder: bool,
+        capabilities: SinkCapabilities,
+        requirements: SinkRequirements,
     }
 
     struct PlanningReader {
         split_count: Arc<AtomicUsize>,
         mode: StreamMode,
+        requirements: SinkRequirements,
     }
 
     #[async_trait]
@@ -280,6 +283,10 @@ mod tests {
         fn description(&self) -> String {
             "planning fake reader".into()
         }
+
+        fn sink_requirements(&self) -> SinkRequirements {
+            self.requirements
+        }
     }
 
     #[async_trait]
@@ -289,7 +296,9 @@ mod tests {
         }
     }
 
-    struct PlanningWriter;
+    struct PlanningWriter {
+        capabilities: SinkCapabilities,
+    }
 
     #[async_trait]
     impl DataWriterJob for PlanningWriter {
@@ -299,6 +308,10 @@ mod tests {
 
         fn description(&self) -> String {
             "planning fake writer".into()
+        }
+
+        fn capabilities(&self) -> SinkCapabilities {
+            self.capabilities
         }
     }
 
@@ -319,12 +332,15 @@ mod tests {
             Ok(Arc::new(PlanningReader {
                 split_count: Arc::clone(&self.split_count),
                 mode: self.mode,
+                requirements: self.requirements,
             }))
         }
 
         fn create_writer(&self, _: Arc<JobConfig>) -> Result<Sink> {
             self.factory_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(PlanningWriter))
+            Ok(Arc::new(PlanningWriter {
+                capabilities: self.capabilities,
+            }))
         }
 
         fn build_record_builder(&self, config: &JobConfig) -> Result<RecordBuilder> {
@@ -344,6 +360,8 @@ mod tests {
                 split_count: Arc::clone(&split_count),
                 mode,
                 fail_builder: false,
+                capabilities: SinkCapabilities::default(),
+                requirements: SinkRequirements::default(),
             }),
             factory_calls,
             split_count,
@@ -374,6 +392,8 @@ mod tests {
             split_count: Arc::new(AtomicUsize::new(0)),
             mode: StreamMode::Batch,
             fail_builder: true,
+            capabilities: SinkCapabilities::default(),
+            requirements: SinkRequirements::default(),
         });
         let master = JobMaster::with_planning_dependencies(StateRepository::new(), planning);
         let error = master
@@ -413,6 +433,39 @@ mod tests {
         assert!(error.to_string().contains("table"));
         assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
         assert_eq!(split_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn initial_mysql_cdc_requires_an_idempotent_snapshot_sink() {
+        let planning = Arc::new(FakePlanning {
+            factory_calls: Arc::new(AtomicUsize::new(0)),
+            split_count: Arc::new(AtomicUsize::new(0)),
+            mode: StreamMode::Streaming,
+            fail_builder: false,
+            capabilities: SinkCapabilities {
+                transactional_writes: false,
+                idempotent_snapshot: false,
+                idempotent_cdc: true,
+                supports_multi_table: true,
+            },
+            requirements: SinkRequirements {
+                transactional_writes: false,
+                idempotent_snapshot: true,
+                idempotent_cdc: true,
+                supports_multi_table: true,
+            },
+        });
+        let config = Arc::new(
+            JobConfig::parse_json(include_str!("../../../cli/user_config/mybinlog2pg.json"))
+                .unwrap(),
+        );
+        let error = JobMaster::with_planning_dependencies(StateRepository::new(), planning)
+            .initialize(config, JobId::new())
+            .await
+            .err()
+            .expect("initial CDC must reject a Sink that cannot replay snapshots safely");
+
+        assert!(format!("{error:#}").contains("idempotent_snapshot"));
     }
 }
 
@@ -546,6 +599,10 @@ impl JobMaster {
             .planning
             .create_writer(Arc::clone(&config))
             .context("planning: create Writer")?;
+        reader
+            .sink_requirements()
+            .validate(writer.capabilities())
+            .context("planning: validate Source/Sink capabilities")?;
         let reader_split = reader
             .split(pipeline.reader_threads)
             .await

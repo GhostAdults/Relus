@@ -7,6 +7,8 @@ pub mod app_config {
     pub mod value;
     pub mod watcher;
 }
+pub mod cdc;
+pub mod connection;
 pub mod constant;
 pub mod data_source_config;
 pub mod job_config;
@@ -16,6 +18,7 @@ pub mod resp;
 pub mod types;
 
 pub use app_config::*;
+pub use connection::*;
 pub use data_source_config::*;
 pub use job_config::*;
 pub use pipeline::*;

@@ -5,6 +5,7 @@ pub use database_writer::{DatabaseJob, DatabaseWriter};
 pub use rdbms_writer_util::rdbms_writer::{RdbmsConfig, RdbmsJob, RdbmsWriter, RowWriter};
 
 use anyhow::{Error, Result};
+pub use relus_common::cdc::SinkCapabilities;
 use relus_common::job_config::{JobConfig, WriteMode};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -37,6 +38,10 @@ pub struct SplitWriterResult {
 pub trait DataWriterJob: Send + Sync {
     async fn split(&self, writer_threads: usize) -> Result<SplitWriterResult>;
     fn description(&self) -> String;
+
+    fn capabilities(&self) -> SinkCapabilities {
+        SinkCapabilities::default()
+    }
 }
 
 /// Writer Task trait

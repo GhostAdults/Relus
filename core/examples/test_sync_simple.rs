@@ -189,6 +189,7 @@ async fn main() {
     let input = DataSourceConfig {
         name: "mysql_source".to_string(),
         source_type: "database".to_string(),
+        config_version: None,
         is_table_mode: true,
         query_sql: Some(vec![
             "SELECT id, type, site_number FROM zone_data".to_string()
@@ -211,6 +212,7 @@ async fn main() {
     let output = DataSourceConfig {
         name: "mysql_target".to_string(),
         source_type: "database".to_string(),
+        config_version: None,
         is_table_mode: true,
         query_sql: None,
         writer_mode: None,
@@ -247,6 +249,7 @@ async fn main() {
     // column_types.insert("createdAt".to_string(), "timestamp".to_string());
 
     let config = JobConfig {
+        execution: None,
         source: input,
         sink: output,
         column_mapping,

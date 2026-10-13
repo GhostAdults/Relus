@@ -1,12 +1,14 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use relus_mysql_cdc_candidate::{
-    classify_mysql_server_error, run_recovery_loop, CdcEnvelope, CdcOffset, CdcOperation, CdcValue,
-    CheckpointPhase, FileCheckpointStore, MySqlReplicationClient, PersistentTestCheckpoint,
-    PrototypeSink, RawReplicationEvent, RecoveryClientFactory, RecoveryFailpoint, RecoveryOptions,
-    ReplicationError, ReplicationErrorKind, RowChange, TestCheckpointStore, TransactionCommit,
+    classify_mysql_server_error, run_recovery_loop, CdcEnvelope, CdcOffset, CdcOperation, CdcRow,
+    CdcValue, CheckpointPhase, FileCheckpointStore, MySqlReplicationClient,
+    PersistentTestCheckpoint, PrototypeSink, RawReplicationEvent, RecoveryClientFactory,
+    RecoveryFailpoint, RecoveryOptions, ReplicationError, ReplicationErrorKind, RowChange,
+    TestCheckpointStore, TransactionCommit,
 };
 
 #[tokio::test]
@@ -210,7 +212,7 @@ struct RecordingSink {
 #[async_trait]
 impl PrototypeSink for RecordingSink {
     async fn write(&mut self, envelope: &CdcEnvelope) -> Result<(), ReplicationError> {
-        self.event_ids.push(envelope.event_id.clone());
+        self.event_ids.push(envelope.event_id.to_string());
         Ok(())
     }
 
@@ -222,7 +224,7 @@ impl PrototypeSink for RecordingSink {
                 "prototype sink rejected the transaction",
             ));
         }
-        self.acknowledged.push(commit.offset.clone());
+        self.acknowledged.push(commit.offset.as_ref().clone());
         Ok(())
     }
 }
@@ -255,12 +257,12 @@ fn transaction(
     id: u64,
 ) -> Vec<Result<Option<RawReplicationEvent>, ReplicationError>> {
     let row = RowChange {
-        database: "sales".to_owned(),
-        table: "orders".to_owned(),
+        database: Arc::from("sales"),
+        table: Arc::from("orders"),
         operation: CdcOperation::Insert,
-        key: BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(id))]),
+        key: CdcRow::from([("id".to_owned(), CdcValue::Unsigned(id))]),
         before: None,
-        after: Some(BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(id))])),
+        after: Some(CdcRow::from([("id".to_owned(), CdcValue::Unsigned(id))])),
     };
     vec![
         Ok(Some(RawReplicationEvent::Begin {
@@ -284,12 +286,12 @@ fn multi_row_transaction(
 ) -> Vec<Result<Option<RawReplicationEvent>, ReplicationError>> {
     let changes = (1..=rows)
         .map(|id| RowChange {
-            database: "sales".to_owned(),
-            table: "orders".to_owned(),
+            database: Arc::from("sales"),
+            table: Arc::from("orders"),
             operation: CdcOperation::Insert,
-            key: BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(id))]),
+            key: CdcRow::from([("id".to_owned(), CdcValue::Unsigned(id))]),
             before: None,
-            after: Some(BTreeMap::from([("id".to_owned(), CdcValue::Unsigned(id))])),
+            after: Some(CdcRow::from([("id".to_owned(), CdcValue::Unsigned(id))])),
         })
         .collect();
     vec![
@@ -1177,6 +1179,9 @@ async fn mysql_server_error_classification_drives_recovery_policy() -> Result<()
     let purged = classify_mysql_server_error(1236, "binlog unavailable");
     assert_eq!(purged.kind, ReplicationErrorKind::BinlogPurged);
     assert!(!purged.retryable);
+    let insecure_transport = classify_mysql_server_error(3159, "secure transport required");
+    assert_eq!(insecure_transport.kind, ReplicationErrorKind::Tls);
+    assert!(!insecure_transport.retryable);
 
     let mut factory = ScriptFactory {
         scripts: VecDeque::from([

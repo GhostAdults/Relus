@@ -1,8 +1,12 @@
 # MySQL CDC library static evaluation
 
-Date: 2026-09-25
+Date: 2026-10-12
 
 Scope: GitHub issue [#28](https://github.com/GhostAdults/Relus/issues/28) and the approved `SPEC READY` design in `docs/specs/mysql-cdc-reader-redesign.md`
+
+This document preserves dated evaluation snapshots. Statuses such as `blocked`, `not_run`, and
+`conditionally_recommended` inside an earlier dated phase describe that phase only; the latest
+decision and blocker disposition are recorded in **2026-10-12 Gate 7 closure** below.
 
 Evaluation type: static source/dependency analysis, isolated compile checks, and the issue #30 environment-aware runtime harness
 
@@ -22,7 +26,11 @@ mysql_async = { version = "=0.37.1", default-features = false, features = [
 
 The isolated resolution used `mysql_common 0.37.3`. The prototype must commit its lockfile so that the complete graph, not only the direct version, is reproducible.
 
-Overall status: **`conditionally_recommended`**. This is only the candidate selection required by phase 1. Protocol behavior, TLS identity verification, authentication, cancellation, resource bounds, MySQL-version support, and non-Windows targets remain `not_run` until the independent prototype supplies runtime or target-build evidence. It is not approved for production migration.
+Current status: **`recommended_for_production_migration`**. The protocol-compressed live
+performance run passed the 80-percent throughput gate at 101.59% of baseline. The project owner
+accepted the resolved transitive-license set, approved production migration, and accepted the
+current MySQL 5.6/8.0 plus Windows scope. Live DML, automatic metadata mapping, and file/position
+and GTID recovery now pass on both in-scope MySQL versions.
 
 `mysql 28.0.2` exposes essentially the same Blackbeam binlog parser and wire primitives but uses a blocking iterator and blocking socket. It is **`rejected`** for the first prototype because active cancellation would require an independently managed blocking thread/socket ownership design, contrary to the hard gate against an uncontrolled blocking reader. `mysql-binlog-connector-rust 0.3.3` is **`rejected`** because the exact published release has no TLS backend at all; absence of OpenSSL is not equivalent to verified TLS.
 
@@ -68,7 +76,7 @@ The matrix summarizes static suitability. “passed (static)” means the releas
 | Consumer backpressure | `passed` (static pull stream; byte bounds still absent) | `passed` (static pull iterator; blocking) | `passed` (static pull API; large packets are fully buffered) |
 | Workspace MSRV 1.93 | `passed` on checked Windows targets | `passed` on checked Windows targets | `passed` on host only; MSVC check was not completed |
 | Permissive direct license | `passed` | `passed` | `passed` |
-| Transitive license hard gate | `blocked` pending policy/legal review of non-enumerated SPDX choices | `blocked` pending policy/legal review; `webpki 0.22.4` has missing registry license metadata | `blocked` pending policy/legal review of non-enumerated SPDX choices |
+| Transitive license hard gate | `passed` by project license-policy approval | historical alternative, not selected | historical rejected candidate, not selected |
 | Windows GNU compile | `passed` | `passed` | `passed` |
 | Windows MSVC compile | `passed` | `passed` | `blocked` (check was stopped before completion) |
 | Linux x86_64 compile | `blocked` (cross C compiler absent) | `blocked` (cross C compiler absent) | `not_run` |
@@ -101,9 +109,9 @@ The parser still materializes a protocol packet and may decompress a transaction
 
 Neither `mysql_async 0.37.1` nor resolved `mysql_common 0.37.3` declares `rust-version`. The isolated graph's highest declared Rust version was 1.88, below Relus's workspace `rust-version = 1.93.0`. `cargo check --locked` passed with rustc 1.93.0 on the host `x86_64-pc-windows-gnu`, and `cargo check --locked --target x86_64-pc-windows-msvc` passed.
 
-Both `cargo tree -i openssl` and `cargo tree -i openssl-sys` reported no matching package for the selected feature graph. Direct dependencies are permissively licensed, but the resolved graph contains SPDX choices outside the spec's short allow-list, notably Unicode-3.0 data crates and target-conditional `r-efi` metadata containing an LGPL alternative alongside MIT/Apache options. This is not evidence of a forbidden GPL/AGPL-only runtime dependency, but the strict production license gate remains `blocked` pending the project's automated license policy/legal confirmation.
+Both `cargo tree -i openssl` and `cargo tree -i openssl-sys` reported no matching package for the selected feature graph. Direct dependencies are permissively licensed. The resolved graph contains SPDX choices outside the spec's short allow-list, notably Unicode-3.0 data crates and target-conditional `r-efi` metadata containing an LGPL alternative alongside MIT/Apache options. The project owner reviewed and accepted this resolved set for the approved migration scope, so the selected candidate's production license gate is `passed`.
 
-Linux x86_64 cross-check was attempted and blocked because `x86_64-linux-gnu-gcc` was unavailable while `ring` and `zstd-sys` ran build scripts. Linux ARM64, Apple Silicon, and MUSL were not run. `zstd-sys` means “no OpenSSL” does not mean “pure Rust/static build proven”; the Phase 4 target matrix remains mandatory.
+Linux x86_64 cross-check was attempted and blocked because `x86_64-linux-gnu-gcc` was unavailable while `ring` and `zstd-sys` ran build scripts. Linux ARM64, Apple Silicon, and MUSL were not run. `zstd-sys` means “no OpenSSL” does not mean “pure Rust/static build proven”; these target checks remain deferred and become mandatory only if those environments are brought back into the migration scope.
 
 ### 2. `mysql 28.0.2`
 
@@ -148,7 +156,7 @@ The selection becomes invalid if the prototype cannot establish all of the follo
 
 1. Lock `mysql_async 0.37.1`, the resolved `mysql_common` version, and selected features in the independent prototype.
 2. Re-run `cargo tree -i openssl` and `cargo tree -i openssl-sys`; both must report no matching package.
-3. Prove required and mutual Rustls connections with correct CA/server identity, and rejection for wrong CA/name; never enable dangerous verification bypasses.
+3. Keep strict required and mutual Rustls modes available, and prove correct-identity and rejection behavior when trust-chain inputs are supplied. The explicit encrypted-only mode is compatibility evidence only: it must never be presented as verified TLS or trust proof.
 4. Prove `mysql_native_password` and `caching_sha2_password` against available environments.
 5. Parse and preserve INSERT, UPDATE, DELETE, TABLE_MAP, ROTATE, GTID, XID/COMMIT, HEARTBEAT, file/position, and transaction order.
 6. Demonstrate cancellation of a pending read and clean shutdown with no leaked worker or connection.
@@ -205,9 +213,13 @@ Host evidence was `rustc 1.93.0` with host triple `x86_64-pc-windows-gnu`. The s
 | macOS Apple Silicon compile | `not_run` |
 | MUSL static-target compile | `not_run` |
 
-## Approval boundary
+## Historical approval boundary for the static phase
 
 This report selects the first prototype candidate only. It does not modify the production Reader, adopt a fork, remove `mysql_cdc`/OpenSSL, change the workspace dependency graph, or authorize production migration. Those actions remain behind the explicit gates in the approved specification.
+
+This boundary records the decision at the end of the static phase and is superseded by the later
+Gate 7 closure for migration authorization; the production Reader still remains unchanged until
+the separately executed migration.
 
 ## Issue #30 verification update
 
@@ -215,11 +227,13 @@ Date: 2026-09-25
 
 Issue: [#30](https://github.com/GhostAdults/Relus/issues/30)
 
-The independent prototype now accepts explicit `disabled`, identity-verified `required`, and
-`mutual` TLS modes. Required and mutual modes configure only caller-supplied certificate paths,
+The independent prototype now accepts explicit `disabled`, compatibility-only `encrypted`,
+identity-verified `required`, and `mutual` TLS modes. Required and mutual modes configure only caller-supplied certificate paths,
 disable built-in roots, and retain Rustls CA and server-name validation. Relus code does not read,
 copy, modify, print, or parse certificate contents; loading and parsing remain inside
-`mysql_async`. The adapter exposes no invalid-certificate or hostname-validation bypass.
+`mysql_async`. The encrypted mode intentionally disables certificate and hostname validation for
+compatibility testing only; it is labelled as identity-unverified and is not a trust mode. Strict
+required and mutual modes expose no invalid-certificate or hostname-validation bypass.
 
 The new `verify` binary reports each available MySQL/version capability as `passed`, `failed`, or
 `not_run`. Negative TLS cases only pass when the connection returns the stable Relus `Tls` error
@@ -261,16 +275,17 @@ cargo tree --locked --manifest-path prototypes/mysql-cdc-candidate/Cargo.toml -i
 | Linux ARM64 compile | `not_run` (target/toolchain unavailable) |
 | macOS Apple Silicon compile | `not_run` (target/toolchain unavailable) |
 | MUSL compile | `not_run` (target/toolchain unavailable) |
-| MySQL 5.6 TLS/auth/cancellation runtime | `not_run` (versioned environment unavailable) |
+| MySQL 5.6 TLS/auth/cancellation runtime | `passed` for current gates; optional encrypted TLS is `failed` on legacy TLSv1 |
 | MySQL 5.7 TLS/auth/cancellation runtime | `not_run` (versioned environment unavailable) |
-| MySQL 8.0 TLS/auth/cancellation runtime | `not_run` (versioned environment unavailable) |
+| MySQL 8.0 TLS/auth/cancellation runtime | `passed` for current version-applicable gates |
 | MySQL 8.4 TLS/auth/cancellation runtime | `not_run` (versioned environment unavailable) |
 | `openssl` inverse dependency | `passed` (no matching package) |
 | `openssl-sys` inverse dependency | `passed` (no matching package) |
 
-These results do not upgrade the candidate beyond `conditionally_recommended`: the approved live
-MySQL environments and certificate paths were absent, Linux compilation remains blocked by a
-missing cross C compiler, and the remaining formal target toolchains were unavailable.
+At the Issue #30 stage these results did not upgrade the candidate beyond
+`conditionally_recommended`: the then-approved live MySQL evidence was incomplete and several
+target environments were unavailable. The later scoped runtime and performance updates below
+supersede that historical limitation.
 
 ## Issue #31 recovery update
 
@@ -363,10 +378,11 @@ next run starts a new consistent snapshot from the beginning.
 Date: 2026-09-26
 
 Issue #33 adds boundedness, data-fidelity, schema-safety, and synthetic-load evidence to the
-isolated prototype. The new `BoundedEventBuffer` acquires permits for both queue slots and
-estimated serialized bytes before enqueue. A slow consumer therefore pauses the producer rather
-than allowing an unbounded in-memory queue; oversized messages fail before they can enter the
-buffer. Current and peak event/byte metrics are exposed for the verification harness.
+isolated prototype. The `BoundedEventBuffer` serializes each message once, acquires permits for
+both queue slots and the resulting actual byte length before enqueue, and exposes the same bytes
+to the Sink. A slow consumer therefore pauses the producer rather than allowing an unbounded
+in-memory queue; oversized messages fail before they can enter the buffer. Current and peak
+event/byte metrics are exposed for the verification harness.
 
 The transaction assembler remains streaming: it emits each row batch immediately, keeps only
 transaction counters, preserves the source order across tables, and emits a `Commit` message only
@@ -387,7 +403,7 @@ calculation.
 
 | Issue #33 evidence item | Result |
 | --- | --- |
-| Event-count and estimated-byte backpressure | `passed` |
+| Event-count and actual serialized-byte backpressure | `passed` |
 | Slow-consumer buffer use stays within configured limits | `passed` |
 | Large transaction does not accumulate rows in the assembler | `passed` |
 | Multi-table source commit order | `passed` |
@@ -400,3 +416,116 @@ calculation.
 
 These are isolated prototype proofs. They do not claim a live performance pass, do not replace the
 production Reader, and do not authorize removing `mysql_cdc` or OpenSSL from the workspace.
+
+## Issue #34 final verification update
+
+Date: 2026-09-26
+
+The final sanitized evaluation is published separately at
+`docs/research/mysql-cdc-final-evaluation.md`. This update records only the execution status; the
+sanitized report contains no endpoint, credential, certificate-path, user-directory, or server
+identity values.
+
+The approved migration version scope is now MySQL 5.6 and MySQL 8.0. MySQL 5.7 and 8.4 remain
+`not_run` outside that scope; no compatibility claim is inferred for them. The verification
+harness isolates TLS inputs per version, has an explicit encrypted-only TLS mode for compatibility
+testing, treats an explicit secure-transport rejection as a passing plaintext-policy check, and
+uses a MySQL-compatible read-only authentication-plugin query.
+
+The available local verification was read-only. MySQL 5.6 passed plaintext policy,
+`mysql_native_password` verification, ROW-binlog/file-position discovery, GTID request, and real
+replication cancellation. Its optional encrypted TLS check failed because the instance negotiates
+legacy TLSv1. MySQL 8.0 correctly rejected plaintext, established encrypted TLS 1.3, verified
+`caching_sha2_password`, and passed GTID and file/position replication checks. Verified identity,
+wrong-CA, and mutual-TLS remain optional follow-up evidence. No database object, server-global
+variable, user, grant, certificate, service, or binlog file was modified.
+
+At the Issue #34 stage the status remained **`conditionally_recommended`**. Later performance,
+license-policy approval, user approval, and live DML/recovery evidence supersede that historical
+status. Production Reader code, the transitional `mysql_cdc` dependency, and transitional OpenSSL
+configuration remain unchanged until the separately executed migration.
+
+| Issue #34 evidence item | Result |
+| --- | --- |
+| Windows MSVC candidate compile | `passed` |
+| Windows GNU candidate compile | `passed` |
+| Windows MSVC verification binary launch | `passed` |
+| Prototype tests and clippy | `passed` |
+| Candidate exact version and resolved dependency evidence | `passed` |
+| Candidate `openssl` inverse dependency check | `passed` |
+| Candidate `openssl-sys` inverse dependency check | `passed` |
+| MySQL 5.6 plaintext policy | `passed` |
+| MySQL 5.6 native authentication | `passed` |
+| MySQL 5.6 ROW-binlog/file-position runtime | `passed` |
+| MySQL 5.6 real replication cancellation | `passed` |
+| MySQL 5.6 encrypted TLS | `failed` (legacy TLSv1; not a current migration gate) |
+| MySQL 5.6 GTID runtime | `passed` |
+| MySQL 8.0 formal runtime | `passed` for current version-applicable checks |
+| MySQL 8.0 plaintext policy | `passed` |
+| MySQL 8.0 encrypted TLS | `passed` |
+| MySQL 8.0 `caching_sha2_password` | `passed` |
+| MySQL 8.0 file/position cancellation | `passed` |
+| MySQL 8.0 GTID runtime | `passed` |
+| MySQL 8.0 verified TLS and identity | `not_run` (optional follow-up) |
+| MySQL 5.7 runtime | `not_run` (outside current scope) |
+| MySQL 8.4 runtime | `not_run` (outside current scope) |
+| Linux runtime and remaining platform matrix | `not_run` (deferred, not current gate) |
+
+## 2026-10-10 live performance update
+
+The same-server release comparison is recorded in
+`docs/research/mysql-cdc-performance-evaluation.md`. The current `mysql_cdc 0.2.1` Reader baseline
+and the `mysql_async 0.37.1` candidate replayed the same 2,000,000-row retained binlog range. After
+one warm-up, three alternating measured runs produced median rates of 237,744.72 rows/s for the
+baseline and 241,515.81 rows/s for the protocol-compressed candidate.
+
+The candidate reached **101.59%** of baseline, above the required 80%, so performance and resource
+use no longer block the candidate. The optimized path serializes once, preallocates the measured
+message size, reuses the exact bytes for buffering and Sink output, computes column order once per
+RowsEvent, shares metadata and event-ID prefixes, avoids intermediate row vectors, uses a scalar
+binlog-value fast path, and exposes MySQL protocol compression as an explicit Reader option. A
+same-coordinate compression A/B measured a 10.83% median improvement. Candidate median peak
+Working Set was 12.60 MiB and median peak Private Bytes was 10.76 MiB for 2,000,000 rows; both
+remained bounded. The earlier 500,000-row transaction also completed without an out-of-memory
+condition.
+
+The dedicated benchmark database was deleted and its schema count was verified as zero.
+Production Reader code, the root workspace dependency graph, and server-global configuration were
+not modified by the evaluation.
+
+## 2026-10-12 Gate 7 closure
+
+The selected candidate is now **`recommended_for_production_migration`**. The following items close
+the report-level blocker gate:
+
+- The project owner accepted the selected candidate's resolved transitive-license set.
+- The user explicitly approved production migration after reviewing the evidence.
+- Current-code Windows GNU and Windows MSVC candidate checks pass with Rust 1.93.0.
+- Live MySQL 5.6 and 8.0 INSERT/UPDATE/DELETE, named-column and primary-key metadata mapping,
+  common-type fidelity, file/position recovery, and GTID recovery pass.
+- The legacy current-Reader MSVC baseline is not a selected-candidate gate. Perl is installed and
+  an MSVC baseline executable was produced; the remaining default vendored-OpenSSL orchestration
+  failure is recorded as a non-gating transitional packaging diagnostic.
+- Linux x86_64, Linux ARM64, macOS Apple Silicon, MUSL, MySQL 5.7, and MySQL 8.4 remain explicitly
+  deferred or outside the current migration scope rather than blocked in-scope evidence.
+- Verified TLS identity, wrong-CA/name, and mutual TLS remain optional follow-up evidence under the
+  approved specification.
+
+Historical `blocked` entries elsewhere in this document describe rejected alternatives or checks
+that were outside the currently approved scope at the time they were run. They are not unresolved
+blocks on the selected `mysql_async 0.37.1` production candidate.
+
+## 2026-10-12 production migration implementation
+
+Following explicit user approval, the selected adapter has been migrated into the production
+Reader/Engine/Writer path. The root workspace now pins `mysql_async 0.37.1` with Rustls-only
+features, removes the legacy `mysql_cdc` and OpenSSL dependencies, registers `mysql_cdc`, and keeps
+`mysql_binlog` only as a migration-error alias. The production path includes versioned strict
+configuration, event envelopes, actual serialized-byte backpressure, heartbeat timeouts, bounded
+shutdown, Sink capability checks, commit acknowledgment, monotonic Redb checkpoints, replay-safe
+RDBMS writes, and the `initial` consistent-snapshot handoff.
+
+This implementation does not expand the accepted runtime scope beyond MySQL 5.6/8.0 and Windows
+GNU/MSVC, does not claim exactly-once, and does not claim atomic target transactions. Linux, ARM,
+macOS, MUSL, MySQL 5.7/8.4, verified identity TLS, wrong-CA/name, and mutual TLS remain deferred or
+optional exactly as recorded by the approved gate.

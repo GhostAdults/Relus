@@ -101,6 +101,7 @@ pub struct PreparedGroupStats {
     pub elapsed: std::time::Duration,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_prepared_task_group<R, W>(
     prepared: PreparedTaskGroup,
     reader: Arc<R>,
@@ -201,6 +202,25 @@ async fn csas<R>(
 where
     R: DataReader + ?Sized,
 {
+    if let Some(stream) = reader.read_pipeline(task).await? {
+        let mut sent = 0;
+        futures::pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            let message = result?;
+            if matches!(&message, PipelineMessage::CdcRow(_)) {
+                sent += 1;
+                if let Some(progress) = progress {
+                    progress.records_read(1);
+                }
+            }
+            tx.send(message)
+                .await
+                .map_err(|error| anyhow::anyhow!("发送失败: {error}"))?;
+        }
+        info!("Reader-{pair_id} 已发送 {sent} 条 CDC 事件");
+        return Ok(sent);
+    }
+
     let stream = reader.read_data(task).await?;
     let mut sent = 0;
     let mut buffer = Vec::with_capacity(batch_size);
@@ -295,9 +315,17 @@ where
     let relay_handle = tokio::spawn(async move {
         let mut rx = rx;
         while let Some(msg) = rx.recv().await {
-            if let PipelineMessage::DataBatch(rows) = &msg {
+            let sent = match &msg {
+                PipelineMessage::DataBatch(rows) => rows.len() as u64,
+                PipelineMessage::CdcRow(_) => 1,
+                PipelineMessage::CdcSnapshotTable(_)
+                | PipelineMessage::CdcCommit(_)
+                | PipelineMessage::ReaderFinished
+                | PipelineMessage::Error(_) => 0,
+            };
+            if sent > 0 {
                 if let Some(progress) = &progress {
-                    progress.records_sent(rows.len() as u64);
+                    progress.records_sent(sent);
                 }
             }
             if tx2.send(msg).await.is_err() {
@@ -455,7 +483,7 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream;
-    use relus_common::PipelineMessage;
+    use relus_common::{JobConfig, PipelineMessage};
     use relus_reader::{DataReaderJob, DataReaderTask, JsonStream, SplitReaderResult, StreamMode};
     use relus_writer::{DataWriterJob, DataWriterTask, SplitWriterResult};
 
@@ -568,5 +596,193 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stats.total_written, 0);
+    }
+
+    #[tokio::test]
+    async fn cdc_commit_is_confirmed_only_after_the_sink_acknowledges_it() {
+        use relus_common::cdc::{
+            cdc_commit_ack_channel, BufferedCdcRow, CdcEnvelope, CdcEventId, CdcOffset,
+            CdcOperation, CdcRow, CdcRowMessage, CdcValue, RowChange, TransactionCommit,
+            CDC_SCHEMA_VERSION,
+        };
+        use relus_reader::PipelineStream;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        struct CdcReader {
+            confirmed: mpsc::UnboundedSender<TransactionCommit>,
+        }
+
+        #[async_trait]
+        impl DataReaderJob for CdcReader {
+            async fn split(&self, _: usize) -> Result<SplitReaderResult> {
+                Ok(SplitReaderResult {
+                    total_records: 0,
+                    tasks: Vec::new(),
+                    stream_mode: StreamMode::Streaming,
+                })
+            }
+
+            fn description(&self) -> String {
+                "cdc acknowledgement fixture".into()
+            }
+        }
+
+        #[async_trait]
+        impl DataReaderTask for CdcReader {
+            async fn read_data(&self, _: &ReadTask) -> Result<JsonStream> {
+                anyhow::bail!("CDC readers must use the pipeline stream")
+            }
+
+            async fn read_pipeline(&self, _: &ReadTask) -> Result<Option<PipelineStream>> {
+                let (sender, receiver) = mpsc::channel(2);
+                let confirmed = self.confirmed.clone();
+                tokio::spawn(async move {
+                    let offset = Arc::new(CdcOffset::Position {
+                        file: "mysql-bin.000001".to_owned(),
+                        position: 120,
+                    });
+                    let row = CdcEnvelope {
+                        schema_version: CDC_SCHEMA_VERSION,
+                        event_id: CdcEventId::from("mysql-bin.000001:100:0:0"),
+                        transaction_id: Arc::from("mysql-bin.000001:100"),
+                        transaction_event_index: 0,
+                        row_index: 0,
+                        event_timestamp_seconds: 1,
+                        offset: Arc::clone(&offset),
+                        change: RowChange {
+                            database: Arc::from("sales"),
+                            table: Arc::from("orders"),
+                            operation: CdcOperation::Insert,
+                            key: CdcRow::from([("id", CdcValue::Unsigned(1))]),
+                            before: None,
+                            after: Some(CdcRow::from([("id", CdcValue::Unsigned(1))])),
+                        },
+                    };
+                    sender
+                        .send(Ok(PipelineMessage::CdcRow(BufferedCdcRow::unbounded(
+                            CdcRowMessage {
+                                envelope: row,
+                                target_table: "orders".to_owned(),
+                                column_mapping: Default::default(),
+                            },
+                        ))))
+                        .await
+                        .expect("the pipeline should receive the row");
+                    let commit = TransactionCommit {
+                        schema_version: CDC_SCHEMA_VERSION,
+                        event_id: "commit:mysql-bin.000001:120".to_owned(),
+                        transaction_id: Arc::from("mysql-bin.000001:100"),
+                        offset,
+                        event_count: 1,
+                    };
+                    let (acknowledger, acknowledgement) = cdc_commit_ack_channel(commit);
+                    sender
+                        .send(Ok(PipelineMessage::CdcCommit(acknowledger)))
+                        .await
+                        .expect("the pipeline should receive the commit");
+                    let commit = acknowledgement
+                        .await
+                        .expect("the sink must acknowledge the commit");
+                    let _ = confirmed.send(commit);
+                });
+                let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|item| (item, receiver))
+                });
+                Ok(Some(Box::pin(stream)))
+            }
+        }
+
+        struct AcknowledgingSink;
+
+        #[async_trait]
+        impl DataWriterJob for AcknowledgingSink {
+            async fn split(&self, _: usize) -> Result<SplitWriterResult> {
+                Ok(SplitWriterResult { tasks: Vec::new() })
+            }
+
+            fn description(&self) -> String {
+                "acknowledging sink fixture".into()
+            }
+        }
+
+        #[async_trait]
+        impl DataWriterTask for AcknowledgingSink {
+            async fn write_data(
+                &self,
+                _: WriteTask,
+                mut receiver: mpsc::Receiver<PipelineMessage>,
+            ) -> Result<usize> {
+                let mut written = 0;
+                while let Some(message) = receiver.recv().await {
+                    match message {
+                        PipelineMessage::CdcRow(_) => written += 1,
+                        PipelineMessage::CdcCommit(acknowledger) => {
+                            acknowledger.acknowledge().map_err(|_| {
+                                anyhow::anyhow!("reader dropped commit acknowledgement")
+                            })?
+                        }
+                        PipelineMessage::ReaderFinished => break,
+                        PipelineMessage::DataBatch(_)
+                        | PipelineMessage::CdcSnapshotTable(_)
+                        | PipelineMessage::Error(_) => {}
+                    }
+                }
+                Ok(written)
+            }
+        }
+
+        let (confirmed_tx, mut confirmed_rx) = mpsc::unbounded_channel();
+        let reader = Arc::new(CdcReader {
+            confirmed: confirmed_tx,
+        });
+        let writer = Arc::new(AcknowledgingSink);
+        let observer: Arc<dyn TaskLifecycleObserver> = Arc::new(NoopObserver);
+        let job_config = Arc::new(
+            JobConfig::parse_json(
+                r#"{"source":{"name":"s","type":"x","config":{}},"target":{"name":"t","type":"x","config":{}},"column_mapping":{}}"#,
+            )
+            .unwrap(),
+        );
+        let stats = run_prepared_task_group(
+            PreparedTaskGroup {
+                group_id: 0,
+                tasks: vec![PreparedPipelineTask {
+                    read_task: ReadTask {
+                        task_id: 0,
+                        conn: serde_json::Value::Null,
+                        query_sql: None,
+                        offset: 0,
+                        limit: 0,
+                    },
+                    write_task: WriteTask {
+                        task_id: 0,
+                        config: job_config,
+                        mode: relus_common::job_config::WriteMode::Insert,
+                        use_transaction: false,
+                        batch_size: 1,
+                    },
+                }],
+                concurrency: 1,
+            },
+            reader,
+            writer,
+            config(),
+            Arc::new(RecordBuilder::new(Default::default(), None).unwrap()),
+            CancellationToken::new(),
+            observer,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let confirmed =
+            tokio::time::timeout(std::time::Duration::from_secs(1), confirmed_rx.recv())
+                .await
+                .expect("the acknowledgement should not stall")
+                .expect("the reader should observe a confirmed commit");
+        assert_eq!(confirmed.offset.position(), 120);
+        assert_eq!(stats.total_read, 1);
+        assert_eq!(stats.total_written, 1);
     }
 }

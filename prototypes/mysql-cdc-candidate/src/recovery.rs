@@ -249,7 +249,7 @@ where
                         checkpoint_sequence += 1;
                         let checkpoint = PersistentTestCheckpoint::new(
                             checkpoint_sequence,
-                            commit.offset,
+                            commit.offset.as_ref().clone(),
                             CheckpointPhase::Streaming,
                         )?;
                         if failpoint == Some(RecoveryFailpoint::DuringCheckpoint) {

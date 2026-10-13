@@ -170,9 +170,11 @@ async fn main() -> Result<()> {
 
     // 创建 JobConfig
     let job_config = JobConfig {
+        execution: None,
         source: relus_common::data_source_config::DataSourceConfig {
             name: "mysql_source".to_string(),
             source_type: "database".to_string(),
+            config_version: None,
             is_table_mode: true,
             query_sql: None,
             writer_mode: None,
@@ -191,6 +193,7 @@ async fn main() -> Result<()> {
         sink: relus_common::data_source_config::DataSourceConfig {
             name: "dummy_target".to_string(),
             source_type: "database".to_string(),
+            config_version: None,
             is_table_mode: true,
             query_sql: None,
             writer_mode: None,
